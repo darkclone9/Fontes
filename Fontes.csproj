@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <LangVersion>7.3</LangVersion>
+    <AssemblyName>Fontes</AssemblyName>
+    <RootNamespace>Fontes</RootNamespace>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <OutputPath>.</OutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="src\**\*.cs" />
+    <Reference Include="System.Xml" />
+  </ItemGroup>
+</Project>

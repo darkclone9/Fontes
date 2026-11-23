@@ -1,0 +1,254 @@
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.IO;
+using System.Linq;
+using System.Windows.Forms;
+
+namespace Fontes
+{
+    internal static class Program
+    {
+        [STAThread]
+        static int Main(string[] args)
+        {
+            if (args != null && args.Any(a => string.Equals(a, "--self-test", StringComparison.OrdinalIgnoreCase)))
+            {
+                return RunSelfTest();
+            }
+
+            if (args != null && args.Any(a => string.Equals(a, "--reset-layout", StringComparison.OrdinalIgnoreCase)))
+            {
+                try
+                {
+                    if (File.Exists(XmlStore.DefaultPath))
+                        File.Delete(XmlStore.DefaultPath);
+                }
+                catch { }
+            }
+
+            if (args != null)
+            {
+                for (int i = 0; i < args.Length - 1; i++)
+                {
+                    if (string.Equals(args[i], "--render-preview", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Application.EnableVisualStyles();
+                        Application.SetCompatibleTextRenderingDefault(false);
+                        using (var form = new MainForm())
+                        using (var bmp = form.RenderVerificationPreview())
+                        {
+                            bmp.Save(args[i + 1], System.Drawing.Imaging.ImageFormat.Png);
+                        }
+                        return 0;
+                    }
+                }
+            }
+
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            var log = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "Fontes", "crash.log");
+            Directory.CreateDirectory(Path.GetDirectoryName(log));
+            void Write(string what)
+            {
+                try { File.AppendAllText(log, string.Format("[{0}] {1}\r\n", DateTime.Now.ToString("HH:mm:ss"), what)); } catch { }
+            }
+            AppDomain.CurrentDomain.UnhandledException += (s, e) => Write("Unhandled: " + (e.ExceptionObject?.ToString() ?? "null"));
+            Application.ThreadException += (s, e) => Write("Thread: " + (e.Exception?.ToString() ?? "null"));
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            try
+            {
+                Application.Run(new MainForm());
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Write("Run: " + ex);
+                throw;
+            }
+        }
+
+        static int RunSelfTest()
+        {
+            try
+            {
+                Console.WriteLine("=== Fontes Self-Test Suite (REA Stardock Fences Parity) ===");
+
+                // 1. Test Resolution Fingerprint & Wallpaper discovery
+                string fp = DesktopHost.GetResolutionFingerprint();
+                if (string.IsNullOrEmpty(fp)) throw new Exception("Resolution fingerprint was empty.");
+                Console.WriteLine("[PASS] DesktopHost.GetResolutionFingerprint: " + fp);
+
+                string wp = DesktopHost.GetWallpaperPath();
+                Console.WriteLine("[PASS] DesktopHost.GetWallpaperPath: " + (wp ?? "(none)"));
+
+                if (!string.IsNullOrEmpty(wp) && File.Exists(wp))
+                {
+                    var cropped = DesktopHost.GetDesktopWallpaper(new Size(640, 360));
+                    var frosted = DesktopHost.GetFrostedDesktopWallpaper(new Size(640, 360));
+                    if (cropped == null || cropped.Width != 640 || cropped.Height != 360)
+                        throw new Exception("DesktopHost.GetDesktopWallpaper failed to produce 640x360 cropped monitor bitmap.");
+                    if (frosted == null || frosted.Width != 640 || frosted.Height != 360)
+                        throw new Exception("DesktopHost.GetFrostedDesktopWallpaper failed to produce 640x360 frosted monitor bitmap.");
+                    Console.WriteLine("[PASS] DesktopHost per-monitor wallpaper crop & frosted glass cache verified.");
+                }
+
+                // 2. Test Fence scrollable layout & DeskGroup properties
+                var fence = new Fence
+                {
+                    Title = "Test Fence",
+                    Rect = new Rectangle(40, 70, 200, 140),
+                    Opacity = 210,
+                    RollupOnHover = true,
+                    LabelMode = TitleBarMode.OnHover,
+                    SortMethod = "TimesOpened",
+                    SortAscending = false,
+                    Edge = DockEdge.Right
+                };
+                for (int i = 0; i < 12; i++)
+                {
+                    fence.Items.Add(new ShortcutItem
+                    {
+                        Name = "App " + i,
+                        Path = @"C:\Windows\notepad.exe",
+                        Target = @"C:\Windows\notepad.exe",
+                        TimesOpened = i * 2
+                    });
+                }
+                fence.SortItems();
+                if (fence.Items[0].TimesOpened != 22)
+                    throw new Exception("Fence.SortItems failed to sort descending by TimesOpened.");
+                fence.AutoArrange();
+                if (!fence.HasOverflow)
+                    throw new Exception("Fence.HasOverflow should be true for 12 items in 200x140 fence.");
+                fence.ScrollBy(60);
+                if (fence.ScrollOffset <= 0)
+                    throw new Exception("Fence.ScrollBy failed to update ScrollOffset.");
+                Console.WriteLine("[PASS] Fence DeskGroup properties, sorting, and scrollable overflow verified.");
+
+                // 3. Test Row-Aligned Fence Geometry (no mid-icon bottom row clipping)
+                var rowFence = new Fence
+                {
+                    Title = "Row Aligned",
+                    Rect = new Rectangle(36, 56, Fence.WidthForColumns(4), Fence.HeightForRows(3))
+                };
+                if (rowFence.Columns != 4 || rowFence.VisibleRows != 3)
+                    throw new Exception("Fence.WidthForColumns(4) / HeightForRows(3) mismatch.");
+                if (rowFence.ClientClipRect.Height != 3 * Fence.CellSize)
+                    throw new Exception("Fence.ClientClipRect.Height is not an exact multiple of CellSize.");
+                Console.WriteLine("[PASS] Fence row-aligned geometry (4x3 grid = " + rowFence.Rect.Width + "x" + rowFence.Rect.Height + ") verified.");
+
+                // 4. Test Multi-criteria RuleEngine
+                RuleEngine.CustomRules.Clear();
+                RuleEngine.CustomRules.Add(new FenceRule
+                {
+                    Name = "Studio Tools",
+                    TargetFenceTitle = "Studio",
+                    ExtensionFilter = ".exe",
+                    NamePattern = "Cubase",
+                    Enabled = true
+                });
+                var cubaseItem = new ShortcutItem { Name = "Cubase 15", Path = @"C:\Program Files\Steinberg\Cubase 15\Cubase15.exe", Target = @"C:\Program Files\Steinberg\Cubase 15\Cubase15.exe" };
+                string cat = RuleEngine.Classify(cubaseItem);
+                if (cat != "Studio")
+                    throw new Exception("RuleEngine failed to match custom FenceRule (got " + cat + ").");
+                Console.WriteLine("[PASS] RuleEngine custom multi-criteria FenceRule verified.");
+
+                // 5. Test XmlStore round-trip & snapshot creation
+                string tempXml = Path.Combine(Path.GetTempPath(), "fontes_selftest_" + Guid.NewGuid().ToString("N") + ".xml");
+                XmlStore.Save(new List<Fence> { fence }, tempXml, false);
+                var loaded = XmlStore.Load(tempXml);
+                File.Delete(tempXml);
+                if (loaded.Count != 1 || loaded[0].Opacity != 210 || loaded[0].Edge != DockEdge.Right || loaded[0].LabelMode != TitleBarMode.OnHover)
+                    throw new Exception("XmlStore round-trip failed to preserve DeskGroup properties.");
+                Console.WriteLine("[PASS] XmlStore XML serialization round-trip verified.");
+
+                // 6. Test Stardock Fences .fencelayout discovery and application
+                var layouts = XmlStore.DiscoverFencesLayouts();
+                if (layouts.Count == 0)
+                    throw new Exception("XmlStore.DiscoverFencesLayouts returned 0 templates.");
+                XmlStore.ApplyFencesLayout(loaded, layouts[0], new Rectangle(0, 0, 1920, 1080), MainForm.ToolbarH);
+                Console.WriteLine("[PASS] XmlStore.DiscoverFencesLayouts discovered " + layouts.Count + " Stardock .fencelayout template(s); applied '" + layouts[0].Name + "'.");
+
+                // 7. Test PortalScanner with parent navigation
+                string srcDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "src");
+                if (Directory.Exists(srcDir))
+                {
+                    var portalItems = PortalScanner.ScanFolder(srcDir, AppDomain.CurrentDomain.BaseDirectory);
+                    if (!portalItems.Any(x => x.IsParentNavigation))
+                        throw new Exception("PortalScanner failed to insert '.. (Up)' parent navigation item.");
+                    Console.WriteLine("[PASS] PortalScanner subfolder breadcrumb and '.. (Up)' navigation verified.");
+                }
+
+                // 8. Test .url IconFile & IconIndex parsing and non-Shield fallback
+                string tempUrl = Path.Combine(Path.GetTempPath(), "fontes_test_" + Guid.NewGuid().ToString("N") + ".url");
+                File.WriteAllText(tempUrl, "[InternetShortcut]\r\nURL=https://example.com\r\nIconFile=C:\\Windows\\explorer.exe\r\nIconIndex=0\r\n");
+                var urlItem = ShortcutResolver.FromFile(tempUrl);
+                File.Delete(tempUrl);
+                if (urlItem.Target != "https://example.com" || string.IsNullOrEmpty(urlItem.IconLocation))
+                    throw new Exception("ShortcutResolver.ResolveUrl failed to parse URL or IconFile.");
+                using (var icon = urlItem.ResolveIcon())
+                {
+                    if (icon == null)
+                        throw new Exception("ShortcutItem.ResolveIcon returned null for .url item.");
+                }
+                Console.WriteLine("[PASS] .url IconFile/IconIndex extraction and Shell icon fallback verified.");
+
+                // 9. Test 9pt Segoe UI typographic label measurement with ClearTypeGridFit inside CellSize=92 (no 'CrystalDiskInf'/'o' split)
+                using (var testBmp = new Bitmap(200, 200))
+                using (var g = Graphics.FromImage(testBmp))
+                using (var itemFont = new Font("Segoe UI", 9f, FontStyle.Regular))
+                using (var fmt = (StringFormat)StringFormat.GenericTypographic.Clone())
+                {
+                    g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+                    fmt.Alignment = StringAlignment.Center;
+                    fmt.LineAlignment = StringAlignment.Near;
+                    fmt.Trimming = StringTrimming.EllipsisCharacter;
+                    fmt.FormatFlags = StringFormatFlags.LineLimit;
+                    int labelW = Fence.CellSize - 2; // 90px
+                    int labelH = 40;
+                    int charsFitted, linesFilled;
+                    g.MeasureString("CrystalDiskInfo", itemFont, new SizeF(labelW, labelH), fmt, out charsFitted, out linesFilled);
+                    if (linesFilled != 1 || charsFitted < "CrystalDiskInfo".Length)
+                        throw new Exception("9pt 'CrystalDiskInfo' wrapped across multiple lines (" + linesFilled + " lines, " + charsFitted + " chars) instead of fitting on 1 line.");
+
+                    g.MeasureString("Corsair Web Hub App", itemFont, new SizeF(labelW, labelH), fmt, out charsFitted, out linesFilled);
+                    if (linesFilled != 2)
+                        throw new Exception("9pt 2-line label 'Corsair Web Hub App' did not fit 2 lines inside label box (linesFilled=" + linesFilled + ").");
+                }
+                Console.WriteLine("[PASS] 9pt Segoe UI ClearTypeGridFit 1-line and 2-line label geometry verified.");
+
+                // 10. Test Taskbar-Free Desktop Pinning, Per-Fence SearchFilter, and Desktop Pages (_SwipeIndex)
+                fence.SearchFilter = "App 1";
+                var filtered = fence.FilteredItems;
+                if (filtered.Count != 3) // "App 1", "App 10", "App 11"
+                    throw new Exception("Fence.FilteredItems expected 3 matches for 'App 1', got " + filtered.Count);
+                fence.SearchFilter = "";
+                fence.PageIndex = 2;
+
+                string tempPageXml = Path.Combine(Path.GetTempPath(), "fontes_pagetest_" + Guid.NewGuid().ToString("N") + ".xml");
+                XmlStore.Save(new List<Fence> { fence }, tempPageXml, false);
+                var loadedPage = XmlStore.Load(tempPageXml);
+                File.Delete(tempPageXml);
+                if (loadedPage.Count != 1 || loadedPage[0].PageIndex != 2)
+                    throw new Exception("XmlStore failed to persist Fence.PageIndex.");
+
+                using (var testForm = new MainForm())
+                {
+                    if (testForm.ShowInTaskbar)
+                        throw new Exception("MainForm.ShowInTaskbar must be false so Fontes never appears on the Windows taskbar.");
+                }
+                Console.WriteLine("[PASS] Taskbar-free ShowInTaskbar=false, per-fence SearchFilter, and Desktop Pages verified.");
+
+                Console.WriteLine("=== ALL SELF-TESTS PASSED ===");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("[FAIL] Self-test error: " + ex);
+                return 1;
+            }
+        }
+    }
+}

@@ -1,0 +1,9 @@
+bin/
+obj/
+*.user
+*.suo
+*.tmp
+*.log
+*.pdb
+272fca05-2e51-4dc1-ae07-396f0b147f59_Fontes.exe
+fontes_verified_screenshot.png
