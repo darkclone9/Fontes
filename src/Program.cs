@@ -104,7 +104,8 @@ namespace Fontes
                     LabelMode = TitleBarMode.OnHover,
                     SortMethod = "TimesOpened",
                     SortAscending = false,
-                    Edge = DockEdge.Right
+                    Edge = DockEdge.Right,
+                    AutoDockToEdge = false
                 };
                 for (int i = 0; i < 12; i++)
                 {
@@ -347,6 +348,47 @@ namespace Fontes
                 if (bigApps.Columns != 10 || bigGames.Columns != 8)
                     throw new Exception("Expected column-aligned proportional horizontal layout to fit 10 cols in Apps and 8 cols in Games (got Apps=" + bigApps.Columns + " cols / " + bigApps.Rect.Width + "px, Games=" + bigGames.Columns + " cols / " + bigGames.Rect.Width + "px).");
                 Console.WriteLine("[PASS] Column-aligned proportional horizontal layout widths (Apps=" + bigApps.Rect.Width + "px [10 cols], Games=" + bigGames.Rect.Width + "px [8 cols], Web=" + smallWeb.Rect.Width + "px [3 cols]) verified.");
+
+                // 13. Test Left, Right, Top, and Bottom Screen-Edge Latching & Hover Pull-Out
+                var leftFence = new Fence
+                {
+                    Title = "Left Drawer",
+                    Rect = new Rectangle(0, 120, Fence.WidthForColumns(3), Fence.HeightForRows(2)),
+                    Edge = DockEdge.Left,
+                    AutoDockToEdge = true,
+                    IsHoverExpanded = false
+                };
+                if (!leftFence.IsEdgeCollapsed || !leftFence.IsSideEdgeCollapsed || leftFence.EffectiveBounds.Width != Fence.EdgeTabThickness || leftFence.EffectiveBounds.X != 0)
+                    throw new Exception("Left edge-latched fence failed to collapse into 32px left side tab.");
+                leftFence.IsHoverExpanded = true;
+                if (leftFence.IsEdgeCollapsed || leftFence.EffectiveBounds.Width != leftFence.Rect.Width)
+                    throw new Exception("Left edge-latched fence failed to pull out to full width on hover.");
+
+                var rightFence = new Fence
+                {
+                    Title = "Right Drawer",
+                    Rect = new Rectangle(2048 - Fence.WidthForColumns(3), 120, Fence.WidthForColumns(3), Fence.HeightForRows(2)),
+                    Edge = DockEdge.Right,
+                    AutoDockToEdge = true,
+                    IsHoverExpanded = false
+                };
+                if (!rightFence.IsEdgeCollapsed || !rightFence.IsSideEdgeCollapsed || rightFence.EffectiveBounds.Width != Fence.EdgeTabThickness || rightFence.EffectiveBounds.Right != 2048)
+                    throw new Exception("Right edge-latched fence failed to collapse into 32px right side tab.");
+                rightFence.IsHoverExpanded = true;
+                if (rightFence.IsEdgeCollapsed || rightFence.EffectiveBounds.X != rightFence.Rect.X)
+                    throw new Exception("Right edge-latched fence failed to pull out to full width on hover.");
+
+                var bottomFence = new Fence
+                {
+                    Title = "Bottom Drawer",
+                    Rect = new Rectangle(100, 1104 - Fence.HeightForRows(2), Fence.WidthForColumns(4), Fence.HeightForRows(2)),
+                    Edge = DockEdge.Bottom,
+                    AutoDockToEdge = true,
+                    IsHoverExpanded = false
+                };
+                if (!bottomFence.IsEdgeCollapsed || bottomFence.EffectiveBounds.Height != Fence.TitleHeight || bottomFence.EffectiveBounds.Bottom != 1104)
+                    throw new Exception("Bottom edge-latched fence failed to collapse into 30px bottom title tab.");
+                Console.WriteLine("[PASS] Left, Right, Top, and Bottom screen-edge latching and hover pull-out verified.");
 
                 Console.WriteLine("=== ALL SELF-TESTS PASSED ===");
                 return 0;

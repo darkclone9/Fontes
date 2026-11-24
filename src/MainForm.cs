@@ -231,6 +231,13 @@ namespace Fontes
                             regionChanged = true;
                             needsRepaint = true;
                         }
+                        else if (!f.IsHoverExpanded && ((f.RolledUp && f.RollupOnHover) || f.IsEdgeLatched) && f.EffectiveBounds.Contains(cur))
+                        {
+                            f.IsHoverExpanded = true;
+                            f.AutoArrange();
+                            regionChanged = true;
+                            needsRepaint = true;
+                        }
                     }
 
                     // Keep pinned at desktop bottom when not peeking on top
@@ -894,6 +901,35 @@ namespace Fontes
             }) { Checked = f.RollupOnHover };
             m.Items.Add(hoverRollItem);
 
+            var edgeLatchMenu = new ToolStripMenuItem("Latch to screen edge (pull out on hover)");
+            var autoDockItem = new ToolStripMenuItem("Auto-collapse when snapped to screen edge", null, (s, e) =>
+            {
+                f.AutoDockToEdge = !f.AutoDockToEdge;
+                f.IsHoverExpanded = false;
+                AutoSave();
+                UpdateWindowRegion();
+                Invalidate();
+            }) { Checked = f.AutoDockToEdge };
+            edgeLatchMenu.DropDownItems.Add(autoDockItem);
+            edgeLatchMenu.DropDownItems.Add(new ToolStripSeparator());
+
+            foreach (var edgeOpt in new[]
+            {
+                (DockEdge.Left, "Latch to Left Edge"),
+                (DockEdge.Right, "Latch to Right Edge"),
+                (DockEdge.Top, "Latch to Top Edge"),
+                (DockEdge.Bottom, "Latch to Bottom Edge"),
+                (DockEdge.Auto, "Unlatch (Float on Desktop)")
+            })
+            {
+                var capturedEdge = edgeOpt.Item1;
+                edgeLatchMenu.DropDownItems.Add(new ToolStripMenuItem(edgeOpt.Item2, null, (s, e) =>
+                {
+                    LatchFenceToEdge(f, capturedEdge);
+                }) { Checked = f.Edge == capturedEdge });
+            }
+            m.Items.Add(edgeLatchMenu);
+
             var labelMenu = new ToolStripMenuItem("Title bar visibility");
             foreach (TitleBarMode mode in Enum.GetValues(typeof(TitleBarMode)))
             {
@@ -1002,6 +1038,44 @@ namespace Fontes
                 Invalidate();
             });
             m.Show(this, at);
+        }
+
+        public void LatchFenceToEdge(Fence f, DockEdge edge)
+        {
+            if (f == null) return;
+            f.Edge = edge;
+            f.AutoDockToEdge = (edge != DockEdge.Auto);
+            f.IsHoverExpanded = false;
+            var r = f.Rect;
+            switch (edge)
+            {
+                case DockEdge.Left:
+                    r.X = 0;
+                    break;
+                case DockEdge.Right:
+                    r.X = Math.Max(0, Width - r.Width);
+                    break;
+                case DockEdge.Top:
+                    r.Y = 0;
+                    break;
+                case DockEdge.Bottom:
+                    r.Y = Math.Max(0, Height - r.Height);
+                    break;
+                case DockEdge.Auto:
+                    if (r.X <= 4) r.X = 24;
+                    if (r.Right >= Width - 4) r.X = Math.Max(12, Width - r.Width - 24);
+                    if (r.Y <= 4) r.Y = 48;
+                    if (r.Bottom >= Height - 4) r.Y = Math.Max(48, Height - r.Height - 24);
+                    break;
+            }
+            f.Rect = r;
+            f.AutoArrange();
+            AutoSave();
+            SetStatus(edge == DockEdge.Auto
+                ? "Unlatched '" + f.Title + "' from screen edge"
+                : "Latched '" + f.Title + "' to " + edge + " screen edge (hover tab to pull out)");
+            UpdateWindowRegion();
+            Invalidate();
         }
 
         void ToggleFenceSearch(Fence f)
@@ -1646,7 +1720,7 @@ namespace Fontes
 
         int HitHeaderButton(Fence f, Point p)
         {
-            if (f == null || !f.TitleBarRect.Contains(p)) return -1;
+            if (f == null || f.IsSideEdgeCollapsed || !f.TitleBarRect.Contains(p)) return -1;
             if (f.CloseButtonRect.Contains(p)) return 2;
             if (f.RollButtonRect.Contains(p)) return 1;
             if (!f.IsEffectiveCollapsed && f.SearchButtonRect.Contains(p)) return 0;
@@ -2076,16 +2150,16 @@ namespace Fontes
 
             if (_quickHide) return;
 
-            // 6. Roll-up hover expansion (RollupOnHover) & item hover feedback
+            // 6. Roll-up & Screen-Edge Latch hover expansion (RollupOnHover / IsEdgeLatched) & item hover feedback
             bool needsRepaint = false;
             bool regionChanged = false;
             foreach (var f in ActivePageFences)
             {
-                if (f.RolledUp && f.RollupOnHover)
+                if ((f.RolledUp && f.RollupOnHover) || f.IsEdgeLatched)
                 {
                     bool insideFull = f.Rect.Contains(e.Location);
-                    bool insideTitle = f.TitleBarRect.Contains(e.Location);
-                    if (!f.IsHoverExpanded && insideTitle)
+                    bool insideTrigger = f.EffectiveBounds.Contains(e.Location);
+                    if (!f.IsHoverExpanded && insideTrigger)
                     {
                         f.IsHoverExpanded = true;
                         f.AutoArrange();
@@ -2200,6 +2274,20 @@ namespace Fontes
                 {
                     _dragFence.SnapHeightToRows();
                     _dragFence.AutoArrange();
+                }
+                if (_dragMove && _dragFence != null)
+                {
+                    if (_dragFence.IsEdgeLatched)
+                    {
+                        // Keep hover-expanded while cursor is still inside the newly latched fence;
+                        // as soon as cursor leaves f.Rect, it will slide into its edge tab!
+                        _dragFence.IsHoverExpanded = _dragFence.Rect.Contains(e.Location);
+                        SetStatus("Latched '" + _dragFence.Title + "' to " + _dragFence.Edge + " edge (move mouse away to tuck)");
+                    }
+                    else
+                    {
+                        _dragFence.IsHoverExpanded = false;
+                    }
                 }
                 _snapGuides.Clear();
                 AutoSave();
@@ -2566,12 +2654,19 @@ namespace Fontes
 
             if (f.IsEffectiveCollapsed)
             {
-                using (var tbr = new SolidBrush(Color.FromArgb(160, 10, 12, 18)))
+                using (var tbr = new SolidBrush(Color.FromArgb(170, 10, 12, 18)))
                 using (var tp = Rounded(r, Fence.CornerRadius))
                 {
                     g.FillPath(tbr, tp);
                 }
-                DrawTitle(g, f, r);
+                if (f.IsSideEdgeCollapsed)
+                {
+                    DrawSideEdgeTab(g, f, r);
+                }
+                else
+                {
+                    DrawTitle(g, f, r);
+                }
                 DrawFenceBorder(g, r, isHoveredFence);
                 return;
             }
@@ -2646,6 +2741,85 @@ namespace Fontes
             RollUp = 1,
             RollDown = 2,
             Close = 3
+        }
+
+        void DrawSideEdgeTab(Graphics g, Fence f, Rectangle tabRect)
+        {
+            bool isLeft = (f.Edge == DockEdge.Left);
+
+            // 1. Pull-out chevron arrow at top of the vertical side tab
+            var chevronRect = new Rectangle(tabRect.X + (tabRect.Width - 20) / 2, tabRect.Y + 10, 20, 20);
+            var oldSmooth = g.SmoothingMode;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var pen = new Pen(Color.FromArgb(225, 165, 205, 255), 1.8f) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+            {
+                float cx = chevronRect.X + 10f;
+                float cy = chevronRect.Y + 10f;
+                if (isLeft)
+                {
+                    // Right-pointing chevron (▸) showing it pulls out to the right
+                    g.DrawLines(pen, new PointF[]
+                    {
+                        new PointF(cx - 2.5f, cy - 4.5f),
+                        new PointF(cx + 2.5f, cy),
+                        new PointF(cx - 2.5f, cy + 4.5f)
+                    });
+                }
+                else
+                {
+                    // Left-pointing chevron (◂) showing it pulls out to the left
+                    g.DrawLines(pen, new PointF[]
+                    {
+                        new PointF(cx + 2.5f, cy - 4.5f),
+                        new PointF(cx - 2.5f, cy),
+                        new PointF(cx + 2.5f, cy + 4.5f)
+                    });
+                }
+            }
+
+            // 2. Item count pill badge near bottom of the vertical side tab
+            string countText = f.Items.Count.ToString();
+            int bh = 18;
+            int bw = Math.Min(tabRect.Width - 6, 26);
+            var badgeRect = new Rectangle(tabRect.X + (tabRect.Width - bw) / 2, tabRect.Bottom - bh - 12, bw, bh);
+            using (var bp = Rounded(badgeRect, 8))
+            using (var bf = new SolidBrush(Color.FromArgb(145, 58, 74, 104)))
+            using (var bpen = new Pen(Color.FromArgb(95, 255, 255, 255), 1f))
+            {
+                g.FillPath(bf, bp);
+                g.DrawPath(bpen, bp);
+            }
+            GfxText.Center(g, countText, badgeRect, Brushes.White, _badgeFont, Color.FromArgb(225, 235, 252));
+
+            // 3. Vertical rotated title text in the middle of the side tab
+            int availH = Math.Max(20, badgeRect.Top - chevronRect.Bottom - 16);
+            if (availH > 30)
+            {
+                var state = g.Save();
+                float midX = tabRect.X + tabRect.Width / 2f;
+                float midY = chevronRect.Bottom + 8 + availH / 2f;
+                g.TranslateTransform(midX, midY);
+                g.RotateTransform(isLeft ? -90f : 90f);
+
+                using (var fmt = new StringFormat
+                {
+                    Alignment = StringAlignment.Center,
+                    LineAlignment = StringAlignment.Center,
+                    Trimming = StringTrimming.EllipsisCharacter,
+                    FormatFlags = StringFormatFlags.NoWrap
+                })
+                using (var sb = new SolidBrush(Color.FromArgb(200, 0, 0, 0)))
+                using (var fg = new SolidBrush(f.TextColor))
+                {
+                    var textBox = new RectangleF(-availH / 2f, -tabRect.Width / 2f, availH, tabRect.Width);
+                    var shadowBox = new RectangleF(textBox.X + 1f, textBox.Y + 1f, textBox.Width, textBox.Height);
+                    g.DrawString(f.DisplayTitle, _titleFont, sb, shadowBox, fmt);
+                    g.DrawString(f.DisplayTitle, _titleFont, fg, textBox, fmt);
+                }
+                g.Restore(state);
+            }
+
+            g.SmoothingMode = oldSmooth;
         }
 
         void DrawTitle(Graphics g, Fence f, Rectangle headerRect)

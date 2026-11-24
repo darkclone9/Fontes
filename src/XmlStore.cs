@@ -73,6 +73,7 @@ namespace Fontes
                 g.SetAttribute("snap", f.SnapToGrid.ToString());
                 g.SetAttribute("locked", f.Locked.ToString());
                 g.SetAttribute("edge", ((int)f.Edge).ToString());
+                g.SetAttribute("autoDockEdge", f.AutoDockToEdge.ToString());
                 g.SetAttribute("labelMode", ((int)f.LabelMode).ToString());
                 g.SetAttribute("sortMethod", f.SortMethod ?? "Name");
                 g.SetAttribute("sortAsc", f.SortAscending.ToString());
@@ -230,6 +231,7 @@ namespace Fontes
                     SnapToGrid = BoolAttr(g, "snap", true),
                     Locked = BoolAttr(g, "locked", false),
                     Edge = (DockEdge)IntAttr(g, "edge", 0),
+                    AutoDockToEdge = BoolAttr(g, "autoDockEdge", true),
                     LabelMode = (TitleBarMode)IntAttr(g, "labelMode", 0),
                     SortMethod = Attr(g, "sortMethod") ?? "Name",
                     SortAscending = BoolAttr(g, "sortAsc", true),
@@ -530,6 +532,8 @@ namespace Fontes
                     {
                         int sw = slotWidths[j];
                         bucket[j].RolledUp = false;
+                        bucket[j].Edge = DockEdge.Auto;
+                        bucket[j].IsHoverExpanded = false;
                         int cols = Math.Max(1, (sw - Fence.SidePad * 2) / Fence.CellSize);
                         int neededRows = Math.Max(1, (Math.Max(1, bucket[j].Items.Count) + cols - 1) / cols);
                         int rows = Math.Min(targetRows, neededRows);
@@ -547,6 +551,8 @@ namespace Fontes
                     for (int j = 0; j < bucket.Count; j++)
                     {
                         bucket[j].RolledUp = false;
+                        bucket[j].Edge = DockEdge.Auto;
+                        bucket[j].IsHoverExpanded = false;
                         bucket[j].Rect = new Rectangle(ar.X, ar.Y + j * (slotH + gap), ar.Width, slotH);
                         bucket[j].SnapHeightToRows();
                         bucket[j].AutoArrange();

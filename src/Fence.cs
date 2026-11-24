@@ -41,6 +41,7 @@ namespace Fontes
         public bool SnapToGrid { get; set; } = true;
         public bool Locked { get; set; }           // VIEWSETTINGFLAG_UNLOCKFENCECONTENTS
         public DockEdge Edge { get; set; } = DockEdge.Auto;
+        public bool AutoDockToEdge { get; set; } = true; // Settings.RollupOnDockToEdge: latch to screen edge & pull out on hover
         public TitleBarMode LabelMode { get; set; } = TitleBarMode.Always;
         public string SortMethod { get; set; } = "Name"; // Name, Category, TimesOpened, DateModified
         public bool SortAscending { get; set; } = true;
@@ -57,6 +58,7 @@ namespace Fontes
 
         public const int CornerRadius = 12;
         public const int TitleHeight = 30;
+        public const int EdgeTabThickness = 32;    // Visible pull-tab thickness when latched to Left or Right screen edge
         public const int CellSize = 92;            // icon cell: 32 icon + 40 2-line 9pt label + padding
         public const int TopPad = 8;
         public const int BottomPad = 8;
@@ -98,15 +100,53 @@ namespace Fontes
             Rect = new Rectangle(Rect.X, Rect.Y, Rect.Width, HeightForRows(VisibleRows));
         }
 
-        public bool IsEffectiveCollapsed => RolledUp && !IsHoverExpanded;
+        public bool IsEdgeLatched => AutoDockToEdge && Edge != DockEdge.Auto;
+
+        public bool IsEdgeCollapsed => IsEdgeLatched && !IsHoverExpanded && !IsSearching;
+
+        public bool IsSideEdgeCollapsed => IsEdgeCollapsed && (Edge == DockEdge.Left || Edge == DockEdge.Right);
+
+        public bool IsEffectiveCollapsed => (RolledUp && !IsHoverExpanded && !IsSearching) || IsEdgeCollapsed;
 
         public Color EffectiveShade => Color.FromArgb(Math.Max(30, Math.Min(255, Opacity)), Shade.R, Shade.G, Shade.B);
 
-        public Rectangle EffectiveBounds => IsEffectiveCollapsed
-            ? new Rectangle(Rect.X, Rect.Y, Rect.Width, TitleHeight)
-            : Rect;
+        public Rectangle EffectiveBounds
+        {
+            get
+            {
+                if (IsEdgeCollapsed)
+                {
+                    switch (Edge)
+                    {
+                        case DockEdge.Left:
+                            return new Rectangle(0, Rect.Y, EdgeTabThickness, Rect.Height);
+                        case DockEdge.Right:
+                            return new Rectangle(Math.Max(0, Rect.Right - EdgeTabThickness), Rect.Y, EdgeTabThickness, Rect.Height);
+                        case DockEdge.Top:
+                            return new Rectangle(Rect.X, 0, Rect.Width, TitleHeight);
+                        case DockEdge.Bottom:
+                            return new Rectangle(Rect.X, Math.Max(0, Rect.Bottom - TitleHeight), Rect.Width, TitleHeight);
+                    }
+                }
+                if (RolledUp && !IsHoverExpanded && !IsSearching)
+                {
+                    return new Rectangle(Rect.X, Rect.Y, Rect.Width, TitleHeight);
+                }
+                return Rect;
+            }
+        }
 
-        public Rectangle TitleBarRect => new Rectangle(Rect.X, Rect.Y, Rect.Width, Math.Min(TitleHeight, Rect.Height));
+        public Rectangle TitleBarRect
+        {
+            get
+            {
+                if (IsSideEdgeCollapsed)
+                    return EffectiveBounds;
+                if (IsEdgeCollapsed && Edge == DockEdge.Bottom)
+                    return EffectiveBounds;
+                return new Rectangle(Rect.X, Rect.Y, Rect.Width, Math.Min(TitleHeight, Rect.Height));
+            }
+        }
 
         // Interactive Title Bar Action Buttons (DesktopDockUI.Settings.UseTitlebarControls)
         public Rectangle CloseButtonRect => new Rectangle(Rect.Right - 26, Rect.Y + 5, 20, 20);
