@@ -17,6 +17,12 @@ namespace Fontes
                 return RunSelfTest();
             }
 
+            if (args != null && args.Any(a => string.Equals(a, "--restore-desktop-icons", StringComparison.OrdinalIgnoreCase)))
+            {
+                DesktopHost.SetNativeDesktopIconsVisible(true);
+                return 0;
+            }
+
             if (args != null && args.Any(a => string.Equals(a, "--reset-layout", StringComparison.OrdinalIgnoreCase)))
             {
                 try
@@ -27,15 +33,26 @@ namespace Fontes
                 catch { }
             }
 
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+
+            if (args != null && args.Any(a => string.Equals(a, "--auto-organize", StringComparison.OrdinalIgnoreCase)))
+            {
+                using (var form = new MainForm(manageNativeDesktopIcons: false))
+                {
+                    form.AutoOrganize();
+                }
+                if (!args.Any(a => string.Equals(a, "--render-preview", StringComparison.OrdinalIgnoreCase)))
+                    return 0;
+            }
+
             if (args != null)
             {
                 for (int i = 0; i < args.Length - 1; i++)
                 {
                     if (string.Equals(args[i], "--render-preview", StringComparison.OrdinalIgnoreCase))
                     {
-                        Application.EnableVisualStyles();
-                        Application.SetCompatibleTextRenderingDefault(false);
-                        using (var form = new MainForm())
+                        using (var form = new MainForm(manageNativeDesktopIcons: false))
                         using (var bmp = form.RenderVerificationPreview())
                         {
                             bmp.Save(args[i + 1], System.Drawing.Imaging.ImageFormat.Png);
@@ -44,9 +61,6 @@ namespace Fontes
                     }
                 }
             }
-
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
             var log = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                 "Fontes", "crash.log");
             Directory.CreateDirectory(Path.GetDirectoryName(log));
@@ -54,18 +68,32 @@ namespace Fontes
             {
                 try { File.AppendAllText(log, string.Format("[{0}] {1}\r\n", DateTime.Now.ToString("HH:mm:ss"), what)); } catch { }
             }
-            AppDomain.CurrentDomain.UnhandledException += (s, e) => Write("Unhandled: " + (e.ExceptionObject?.ToString() ?? "null"));
-            Application.ThreadException += (s, e) => Write("Thread: " + (e.Exception?.ToString() ?? "null"));
+            AppDomain.CurrentDomain.ProcessExit += (s, e) => DesktopHost.SetNativeDesktopIconsVisible(true);
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+            {
+                DesktopHost.SetNativeDesktopIconsVisible(true);
+                Write("Unhandled: " + (e.ExceptionObject?.ToString() ?? "null"));
+            };
+            Application.ThreadException += (s, e) =>
+            {
+                DesktopHost.SetNativeDesktopIconsVisible(true);
+                Write("Thread: " + (e.Exception?.ToString() ?? "null"));
+            };
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
             try
             {
-                Application.Run(new MainForm());
+                Application.Run(new MainForm(manageNativeDesktopIcons: true));
                 return 0;
             }
             catch (Exception ex)
             {
+                DesktopHost.SetNativeDesktopIconsVisible(true);
                 Write("Run: " + ex);
                 throw;
+            }
+            finally
+            {
+                DesktopHost.SetNativeDesktopIconsVisible(true);
             }
         }
 
@@ -389,6 +417,91 @@ namespace Fontes
                 if (!bottomFence.IsEdgeCollapsed || bottomFence.EffectiveBounds.Height != Fence.TitleHeight || bottomFence.EffectiveBounds.Bottom != 1104)
                     throw new Exception("Bottom edge-latched fence failed to collapse into 30px bottom title tab.");
                 Console.WriteLine("[PASS] Left, Right, Top, and Bottom screen-edge latching and hover pull-out verified.");
+
+                // 14. Test Non-Destructive SysListView32 Desktop Icon Hiding, Complete DesktopScanner (Folders, Loose Files, Recycle Bin), Item Context Menu & Live Sync
+                IntPtr hListView = DesktopHost.GetDesktopIconsListView();
+                if (hListView != IntPtr.Zero)
+                {
+                    bool origVisible = DesktopHost.AreNativeDesktopIconsVisible();
+                    try
+                    {
+                        DesktopHost.SetNativeDesktopIconsVisible(false);
+                        if (DesktopHost.AreNativeDesktopIconsVisible())
+                            throw new Exception("DesktopHost.SetNativeDesktopIconsVisible(false) failed to hide SysListView32.");
+                        DesktopHost.SetNativeDesktopIconsVisible(true);
+                        if (!DesktopHost.AreNativeDesktopIconsVisible())
+                            throw new Exception("DesktopHost.SetNativeDesktopIconsVisible(true) failed to restore SysListView32.");
+                    }
+                    finally
+                    {
+                        DesktopHost.SetNativeDesktopIconsVisible(origVisible);
+                    }
+                }
+
+                var scannedAll = DesktopScanner.Scan();
+                var recycleItem = scannedAll.FirstOrDefault(x => x.IsRecycleBin);
+                if (recycleItem == null || recycleItem.Category != "Folders")
+                    throw new Exception("DesktopScanner.Scan() failed to include built-in Recycle Bin item in 'Folders' category.");
+                using (var rbIcon = recycleItem.ResolveIcon())
+                {
+                    if (rbIcon == null)
+                        throw new Exception("Recycle Bin ShortcutItem.ResolveIcon() returned null.");
+                }
+
+                string tempLockFile = Path.Combine(Path.GetTempPath(), "~$lock_test.docx");
+                string tempIniFile = Path.Combine(Path.GetTempPath(), "desktop.ini");
+                File.WriteAllText(tempLockFile, "lock");
+                File.WriteAllText(tempIniFile, "[.ShellClassInfo]");
+                try
+                {
+                    if (DesktopScanner.ShouldIncludeFile(tempLockFile))
+                        throw new Exception("DesktopScanner.ShouldIncludeFile failed to skip ~$* Office lock file.");
+                    if (DesktopScanner.ShouldIncludeFile(tempIniFile))
+                        throw new Exception("DesktopScanner.ShouldIncludeFile failed to skip desktop.ini.");
+                }
+                finally
+                {
+                    File.Delete(tempLockFile);
+                    File.Delete(tempIniFile);
+                }
+
+                string origXml14 = File.Exists(XmlStore.DefaultPath) ? File.ReadAllText(XmlStore.DefaultPath) : null;
+                try
+                {
+                    using (var testForm14 = new MainForm(manageNativeDesktopIcons: false))
+                    {
+                        string sampleDir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
+                        var folderShortcut = new ShortcutItem
+                        {
+                            Name = "SampleFolder",
+                            Path = sampleDir,
+                            Target = sampleDir,
+                            Category = "Folders",
+                            IsFolderPortal = false
+                        };
+                        var fHost = testForm14.Fences.FirstOrDefault() ?? new Fence { Title = "Folders" };
+                        using (var itemMenu = testForm14.BuildItemContextMenu(fHost, folderShortcut))
+                        {
+                            var labels = itemMenu.Items.Cast<ToolStripItem>().Select(i => i.Text).ToList();
+                            if (!labels.Contains("Open / Launch") ||
+                                !labels.Contains("Open File Location in Explorer") ||
+                                !labels.Contains("Turn Folder into Folder Portal Fence") ||
+                                !labels.Contains("Move to Fence") ||
+                                !labels.Contains("Remove from Fence") ||
+                                !labels.Contains("Fence Options"))
+                            {
+                                throw new Exception("BuildItemContextMenu missing required item context menu entries: " + string.Join(", ", labels));
+                            }
+                        }
+                        testForm14.SyncDesktopChanges(silent: true);
+                    }
+                }
+                finally
+                {
+                    if (origXml14 != null)
+                        File.WriteAllText(XmlStore.DefaultPath, origXml14);
+                }
+                Console.WriteLine("[PASS] SysListView32 non-destructive desktop icon hide/restore, Complete DesktopScanner (Folders, Loose Files, Recycle Bin=" + scannedAll.Count + " total items), Item Context Menu, and SyncDesktopChanges verified.");
 
                 Console.WriteLine("=== ALL SELF-TESTS PASSED ===");
                 return 0;

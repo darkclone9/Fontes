@@ -92,10 +92,17 @@ namespace Fontes
         bool _inModalDialog;
         bool _singleClickLaunch;
         bool _embedInProgman;
+        bool _manageNativeDesktopIcons;
+        bool _hideNativeDesktopIcons = true;
+        FileSystemWatcher _userDesktopWatcher;
+        FileSystemWatcher _publicDesktopWatcher;
+        volatile bool _desktopSyncPending;
+        DateTime _lastDesktopEventUtc = DateTime.MinValue;
         string _statusBanner = "";
         DateTime _statusUntil = DateTime.MinValue;
 
         public List<Fence> Fences => _fences;
+        public bool HideNativeDesktopIcons => _hideNativeDesktopIcons;
 
         public int CurrentPage
         {
@@ -146,8 +153,9 @@ namespace Fontes
         bool IsStatusToastVisible =>
             _drawFenceMode || _peek || _quickHide || (DateTime.Now < _statusUntil && !string.IsNullOrEmpty(_statusBanner));
 
-        public MainForm()
+        public MainForm(bool manageNativeDesktopIcons = false)
         {
+            _manageNativeDesktopIcons = manageNativeDesktopIcons;
             Text = "Fontes — Desktop Organizer";
             BackColor = Color.FromArgb(20, 22, 28);
             FormBorderStyle = FormBorderStyle.None;
@@ -178,11 +186,22 @@ namespace Fontes
 
             BuildCanvasContextMenu();
             InitSystemTray();
+            InitDesktopWatchers();
 
             _uiTimer = new Timer { Interval = 350 };
             bool lastStatusToast = IsStatusToastVisible;
             _uiTimer.Tick += (s, e) =>
             {
+                if (_desktopSyncPending && (DateTime.UtcNow - _lastDesktopEventUtc).TotalMilliseconds >= 300)
+                {
+                    SyncDesktopChanges();
+                }
+
+                if (_manageNativeDesktopIcons && _hideNativeDesktopIcons && DesktopHost.AreNativeDesktopIconsVisible())
+                {
+                    DesktopHost.SetNativeDesktopIconsVisible(false);
+                }
+
                 bool curToast = IsStatusToastVisible;
                 bool regionChanged = false;
                 bool needsRepaint = false;
@@ -252,12 +271,18 @@ namespace Fontes
 
             Shown += (s, e) =>
             {
+                _manageNativeDesktopIcons = true;
+                if (_hideNativeDesktopIcons)
+                    DesktopHost.SetNativeDesktopIconsVisible(false);
+                SyncDesktopChanges(silent: true);
                 DesktopHost.Embed(this, _embedInProgman);
                 DesktopHost.RegisterPeekHotkeys(Handle);
                 UpdateWindowRegion();
             };
             FormClosing += (s, e) =>
             {
+                if (_manageNativeDesktopIcons)
+                    DesktopHost.SetNativeDesktopIconsVisible(true);
                 CleanupResources();
                 DesktopHost.UnregisterPeekHotkeys(Handle);
                 AutoSave(false);
@@ -272,7 +297,21 @@ namespace Fontes
 
         void CleanupResources()
         {
+            if (_manageNativeDesktopIcons)
+                DesktopHost.SetNativeDesktopIconsVisible(true);
             UninstallDrawFenceHook();
+            if (_userDesktopWatcher != null)
+            {
+                _userDesktopWatcher.EnableRaisingEvents = false;
+                _userDesktopWatcher.Dispose();
+                _userDesktopWatcher = null;
+            }
+            if (_publicDesktopWatcher != null)
+            {
+                _publicDesktopWatcher.EnableRaisingEvents = false;
+                _publicDesktopWatcher.Dispose();
+                _publicDesktopWatcher = null;
+            }
             if (_uiTimer != null)
             {
                 _uiTimer.Stop();
@@ -470,21 +509,38 @@ namespace Fontes
                 UpdateWindowRegion();
                 Invalidate();
             });
+            var showNativeIconsItem = new ToolStripMenuItem("Show native Windows desktop icons", null, (s, e) =>
+            {
+                ToggleNativeDesktopIcons();
+            });
             ctx.Opening += (s, e) =>
             {
                 autoHideHudItem.Checked = _autoHideHud;
                 singleClickItem.Checked = _singleClickLaunch;
                 shellEmbedItem.Checked = _embedInProgman;
+                showNativeIconsItem.Checked = !_hideNativeDesktopIcons;
             };
             ctx.Items.Add(autoHideHudItem);
             ctx.Items.Add(singleClickItem);
             ctx.Items.Add(shellEmbedItem);
+            ctx.Items.Add(showNativeIconsItem);
 
             ctx.Items.Add(new ToolStripSeparator());
             ctx.Items.Add("Save layout now", null, (s, e) => SaveLayout());
             ctx.Items.Add("Reload saved layout", null, (s, e) => LoadLayout());
             ctx.Items.Add("Exit Fontes", null, (s, e) => Close());
             CanvasMenu = ctx;
+        }
+
+        public void ToggleNativeDesktopIcons()
+        {
+            _hideNativeDesktopIcons = !_hideNativeDesktopIcons;
+            DesktopHost.SetNativeDesktopIconsVisible(!_hideNativeDesktopIcons);
+            SetStatus(_hideNativeDesktopIcons
+                ? "Native Windows desktop icons hidden (SysListView32)"
+                : "Native Windows desktop icons shown");
+            UpdateWindowRegion();
+            Invalidate();
         }
 
         void PopulateSnapshotsMenu(ToolStripMenuItem snapsMenu)
@@ -538,6 +594,7 @@ namespace Fontes
                 ("Page 1/3", CycleDesktopPage),
                 ("Roll All", ToggleRollAll),
                 ("Hide", ToggleQuickHide),
+                ("Icons", ToggleNativeDesktopIcons),
                 ("Exit", Close)
             };
         }
@@ -840,7 +897,7 @@ namespace Fontes
                 {
                     var r = HudButtonRect(i);
                     bool isHover = (_hudHover == i);
-                    bool isActiveToggle = (i == 2 && _drawFenceMode) || (i == 9 && _quickHide);
+                    bool isActiveToggle = (i == 2 && _drawFenceMode) || (i == 9 && _quickHide) || (i == 10 && !_hideNativeDesktopIcons);
                     Color btnFill = isActiveToggle
                         ? Color.FromArgb(210, 62, 118, 210)
                         : (isHover ? Color.FromArgb(190, 68, 78, 108) : (i == 0 ? Color.FromArgb(160, 42, 52, 76) : Color.FromArgb(120, 36, 38, 50)));
@@ -884,14 +941,150 @@ namespace Fontes
 
         #endregion
 
-        #region Per-Fence Context Menu & Customization Dialogs
+        #region Per-Item & Per-Fence Context Menus & Customization Dialogs
+
+        public ContextMenuStrip BuildItemContextMenu(Fence f, ShortcutItem item)
+        {
+            var m = new ContextMenuStrip();
+            m.Items.Add("Open / Launch", null, (s, e) => ActivateItem(item, f));
+            m.Items.Add("Open File Location in Explorer", null, (s, e) => OpenItemLocationInExplorer(item));
+
+            bool isDirectory = !string.IsNullOrEmpty(item.Path) && Directory.Exists(item.Path) && !item.IsParentNavigation;
+            if (isDirectory)
+            {
+                m.Items.Add("Turn Folder into Folder Portal Fence", null, (s, e) => ConvertFolderItemToPortalFence(f, item));
+            }
+
+            var moveMenu = new ToolStripMenuItem("Move to Fence");
+            foreach (var targetFence in _fences.Where(x => x != f && string.IsNullOrEmpty(x.PortalPath)))
+            {
+                var captured = targetFence;
+                string label = captured.Title + (captured.PageIndex != _currentPage ? " (Page " + (captured.PageIndex + 1) + ")" : "");
+                moveMenu.DropDownItems.Add(label, null, (s, e) =>
+                {
+                    f.Items.Remove(item);
+                    captured.Items.Add(item);
+                    f.AutoArrange();
+                    captured.AutoArrange();
+                    AutoSave();
+                    SetStatus("Moved '" + item.DisplayText + "' to " + captured.Title);
+                    UpdateWindowRegion();
+                    Invalidate();
+                });
+            }
+            if (moveMenu.DropDownItems.Count == 0)
+            {
+                moveMenu.DropDownItems.Add("(No other fences)").Enabled = false;
+            }
+            m.Items.Add(moveMenu);
+
+            m.Items.Add("Remove from Fence", null, (s, e) =>
+            {
+                f.Items.Remove(item);
+                f.AutoArrange();
+                AutoSave();
+                SetStatus("Removed '" + item.DisplayText + "' from " + f.Title);
+                UpdateWindowRegion();
+                Invalidate();
+            });
+
+            m.Items.Add(new ToolStripSeparator());
+            var fenceSubMenu = new ToolStripMenuItem("Fence Options");
+            PopulateFenceMenuItems(fenceSubMenu.DropDownItems, f);
+            m.Items.Add(fenceSubMenu);
+            return m;
+        }
+
+        void ShowItemMenu(Fence f, ShortcutItem item, Point at)
+        {
+            var m = BuildItemContextMenu(f, item);
+            m.Show(this, at);
+        }
+
+        void OpenItemLocationInExplorer(ShortcutItem item)
+        {
+            if (item == null) return;
+            try
+            {
+                if (item.IsRecycleBin)
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "explorer.exe",
+                        Arguments = "shell:RecycleBinFolder",
+                        UseShellExecute = true
+                    });
+                    return;
+                }
+
+                string pathToSelect = null;
+                if (!string.IsNullOrEmpty(item.Path) && (File.Exists(item.Path) || Directory.Exists(item.Path)))
+                    pathToSelect = item.Path;
+                else if (!string.IsNullOrEmpty(item.Target) && (File.Exists(item.Target) || Directory.Exists(item.Target)))
+                    pathToSelect = item.Target;
+
+                if (!string.IsNullOrEmpty(pathToSelect))
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "explorer.exe",
+                        Arguments = "/select,\"" + pathToSelect + "\"",
+                        UseShellExecute = true
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Could not open file location: " + ex.Message);
+            }
+        }
+
+        public Fence ConvertFolderItemToPortalFence(Fence sourceFence, ShortcutItem folderItem)
+        {
+            if (folderItem == null || string.IsNullOrEmpty(folderItem.Path) || !Directory.Exists(folderItem.Path))
+                return null;
+
+            if (sourceFence != null && string.IsNullOrEmpty(sourceFence.PortalPath))
+            {
+                sourceFence.Items.Remove(folderItem);
+                sourceFence.AutoArrange();
+            }
+
+            Size desiredSize = new Size(Fence.WidthForColumns(3), Fence.HeightForRows(2));
+            var portalFence = new Fence
+            {
+                Title = folderItem.DisplayText,
+                PortalPath = folderItem.Path,
+                CurrentPortalPath = folderItem.Path,
+                Shade = CatShade("Folders"),
+                Opacity = 210,
+                Z = _fences.Count == 0 ? 0 : _fences.Max(x => x.Z) + 1,
+                PageIndex = _currentPage,
+                Rect = NextFreeRect(desiredSize),
+                Items = PortalScanner.ScanFolder(folderItem.Path, folderItem.Path)
+            };
+            portalFence.SnapHeightToRows();
+            portalFence.AutoArrange();
+            _fences.Add(portalFence);
+            AutoSave();
+            SetStatus("Converted '" + folderItem.DisplayText + "' into Folder Portal fence");
+            UpdateWindowRegion();
+            Invalidate();
+            return portalFence;
+        }
 
         void ShowFenceMenu(Fence f, Point at)
         {
             var m = new ContextMenuStrip();
-            m.Items.Add("Rename fence…", null, (s, e) => RenameFence(f));
-            m.Items.Add("Customize color, opacity & style…", null, (s, e) => CustomizeFence(f));
-            m.Items.Add("Roll up / unroll", null, (s, e) => { f.RollUp(); AutoSave(); UpdateWindowRegion(); Invalidate(); });
+            PopulateFenceMenuItems(m.Items, f);
+            m.Show(this, at);
+        }
+
+        void PopulateFenceMenuItems(ToolStripItemCollection items, Fence f)
+        {
+            items.Add("Rename fence…", null, (s, e) => RenameFence(f));
+            items.Add("Customize color, opacity & style…", null, (s, e) => CustomizeFence(f));
+            items.Add("Roll up / unroll", null, (s, e) => { f.RollUp(); AutoSave(); UpdateWindowRegion(); Invalidate(); });
 
             var hoverRollItem = new ToolStripMenuItem("Expand on mouse hover when rolled up", null, (s, e) =>
             {
@@ -899,7 +1092,7 @@ namespace Fontes
                 AutoSave();
                 Invalidate();
             }) { Checked = f.RollupOnHover };
-            m.Items.Add(hoverRollItem);
+            items.Add(hoverRollItem);
 
             var edgeLatchMenu = new ToolStripMenuItem("Latch to screen edge (pull out on hover)");
             var autoDockItem = new ToolStripMenuItem("Auto-collapse when snapped to screen edge", null, (s, e) =>
@@ -928,7 +1121,7 @@ namespace Fontes
                     LatchFenceToEdge(f, capturedEdge);
                 }) { Checked = f.Edge == capturedEdge });
             }
-            m.Items.Add(edgeLatchMenu);
+            items.Add(edgeLatchMenu);
 
             var labelMenu = new ToolStripMenuItem("Title bar visibility");
             foreach (TitleBarMode mode in Enum.GetValues(typeof(TitleBarMode)))
@@ -941,7 +1134,7 @@ namespace Fontes
                     Invalidate();
                 }) { Checked = f.LabelMode == captured });
             }
-            m.Items.Add(labelMenu);
+            items.Add(labelMenu);
 
             var sortMenu = new ToolStripMenuItem("Sort items by");
             foreach (var sm in new[] { "Name", "Category", "TimesOpened", "DateModified" })
@@ -962,12 +1155,12 @@ namespace Fontes
                     Invalidate();
                 }) { Checked = string.Equals(f.SortMethod, captured, StringComparison.OrdinalIgnoreCase) });
             }
-            m.Items.Add(sortMenu);
+            items.Add(sortMenu);
 
-            m.Items.Add("Filter / Search items in fence… (Ctrl+F)", null, (s, e) => ToggleFenceSearch(f));
+            items.Add("Filter / Search items in fence… (Ctrl+F)", null, (s, e) => ToggleFenceSearch(f));
             if (!string.IsNullOrEmpty(f.SearchFilter))
             {
-                m.Items.Add("Clear search filter ('" + f.SearchFilter + "')", null, (s, e) =>
+                items.Add("Clear search filter ('" + f.SearchFilter + "')", null, (s, e) =>
                 {
                     f.SearchFilter = "";
                     f.IsSearching = false;
@@ -991,18 +1184,18 @@ namespace Fontes
                     Invalidate();
                 }) { Checked = f.PageIndex == capturedPage });
             }
-            m.Items.Add(pageMoveMenu);
+            items.Add(pageMoveMenu);
 
-            m.Items.Add(new ToolStripSeparator());
-            m.Items.Add("Bind Folder Portal…", null, (s, e) => BindFolderPortal(f));
+            items.Add(new ToolStripSeparator());
+            items.Add("Bind Folder Portal…", null, (s, e) => BindFolderPortal(f));
             if (!string.IsNullOrEmpty(f.PortalPath))
             {
-                m.Items.Add("Open Portal Folder in Explorer", null, (s, e) =>
+                items.Add("Open Portal Folder in Explorer", null, (s, e) =>
                 {
                     try { Process.Start(new ProcessStartInfo { FileName = f.ActivePortalDirectory, UseShellExecute = true }); } catch { }
                 });
-                m.Items.Add("Refresh Folder Portal", null, (s, e) => RefreshPortal(f));
-                m.Items.Add("Unbind Folder Portal", null, (s, e) =>
+                items.Add("Refresh Folder Portal", null, (s, e) => RefreshPortal(f));
+                items.Add("Unbind Folder Portal", null, (s, e) =>
                 {
                     f.PortalPath = null;
                     f.CurrentPortalPath = null;
@@ -1012,14 +1205,14 @@ namespace Fontes
                 });
             }
 
-            m.Items.Add(new ToolStripSeparator());
+            items.Add(new ToolStripSeparator());
             var snapItem = new ToolStripMenuItem("Snap to grid & adjacent fences", null, (s, e) =>
             {
                 f.SnapToGrid = !f.SnapToGrid;
                 AutoSave();
                 Invalidate();
             }) { Checked = f.SnapToGrid };
-            m.Items.Add(snapItem);
+            items.Add(snapItem);
 
             var lockItem = new ToolStripMenuItem("Lock fence position & size", null, (s, e) =>
             {
@@ -1027,17 +1220,16 @@ namespace Fontes
                 AutoSave();
                 Invalidate();
             }) { Checked = f.Locked };
-            m.Items.Add(lockItem);
+            items.Add(lockItem);
 
-            m.Items.Add(new ToolStripSeparator());
-            m.Items.Add("Delete fence", null, (s, e) =>
+            items.Add(new ToolStripSeparator());
+            items.Add("Delete fence", null, (s, e) =>
             {
                 _fences.Remove(f);
                 AutoSave();
                 UpdateWindowRegion();
                 Invalidate();
             });
-            m.Show(this, at);
         }
 
         public void LatchFenceToEdge(Fence f, DockEdge edge)
@@ -1657,6 +1849,166 @@ namespace Fontes
             }
         }
 
+        void InitDesktopWatchers()
+        {
+            string userDesktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+            string publicDesktop = Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
+            _userDesktopWatcher = CreateDesktopWatcher(userDesktop);
+            _publicDesktopWatcher = CreateDesktopWatcher(publicDesktop);
+        }
+
+        FileSystemWatcher CreateDesktopWatcher(string dir)
+        {
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return null;
+            try
+            {
+                var w = new FileSystemWatcher(dir)
+                {
+                    IncludeSubdirectories = false,
+                    NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite
+                };
+                w.Created += OnDesktopFileSystemEvent;
+                w.Deleted += OnDesktopFileSystemEvent;
+                w.Renamed += OnDesktopFileSystemRenamed;
+                w.EnableRaisingEvents = true;
+                return w;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        void OnDesktopFileSystemEvent(object sender, FileSystemEventArgs e)
+        {
+            _lastDesktopEventUtc = DateTime.UtcNow;
+            _desktopSyncPending = true;
+        }
+
+        void OnDesktopFileSystemRenamed(object sender, RenamedEventArgs e)
+        {
+            _lastDesktopEventUtc = DateTime.UtcNow;
+            _desktopSyncPending = true;
+        }
+
+        static bool IsDesktopPath(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            try
+            {
+                string full = Path.GetFullPath(path);
+                string parent = Path.GetDirectoryName(full);
+                if (string.IsNullOrEmpty(parent)) return false;
+                string userDesktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory).TrimEnd('\\');
+                string publicDesktop = Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory).TrimEnd('\\');
+                string normParent = parent.TrimEnd('\\');
+                return string.Equals(normParent, userDesktop, StringComparison.OrdinalIgnoreCase) ||
+                       string.Equals(normParent, publicDesktop, StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>Incrementally syncs newly created, renamed, or deleted files/folders on User &amp; Public
+        /// Desktops into the matching category fences without losing user-customized fence positions or manual moves.</summary>
+        public int SyncDesktopChanges(bool silent = false)
+        {
+            _desktopSyncPending = false;
+            var scanned = DesktopScanner.Scan();
+            var modifiedFences = new HashSet<Fence>();
+            int removedCount = 0;
+            int addedCount = 0;
+
+            // 1. Remove deleted desktop items from non-portal fences
+            foreach (var f in _fences)
+            {
+                if (!string.IsNullOrEmpty(f.PortalPath)) continue;
+                for (int i = f.Items.Count - 1; i >= 0; i--)
+                {
+                    var it = f.Items[i];
+                    if (it == null || it.IsRecycleBin || it.IsParentNavigation) continue;
+                    if (!string.IsNullOrEmpty(it.Path) && IsDesktopPath(it.Path) &&
+                        !File.Exists(it.Path) && !Directory.Exists(it.Path))
+                    {
+                        f.Items.RemoveAt(i);
+                        modifiedFences.Add(f);
+                        removedCount++;
+                    }
+                }
+            }
+
+            // 2. Collect all item paths currently present across all fences
+            var existingPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var f in _fences)
+            {
+                if (!string.IsNullOrEmpty(f.PortalPath))
+                    existingPaths.Add(f.PortalPath);
+                foreach (var it in f.Items)
+                {
+                    if (it != null && !string.IsNullOrEmpty(it.Path))
+                        existingPaths.Add(it.Path);
+                }
+            }
+
+            // 3. Add newly created/renamed desktop items into their matching category fence
+            foreach (var it in scanned)
+            {
+                if (string.IsNullOrEmpty(it.Path) || existingPaths.Contains(it.Path))
+                    continue;
+
+                string category = RuleEngine.Classify(it);
+                it.Category = category;
+
+                var targetFence = _fences.FirstOrDefault(x =>
+                    string.IsNullOrEmpty(x.PortalPath) &&
+                    (string.Equals(x.RuleCategory, category, StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(x.Title, category, StringComparison.OrdinalIgnoreCase)));
+
+                if (targetFence == null)
+                {
+                    Color c = CatShade(category);
+                    Size desiredSize = new Size(Fence.WidthForColumns(3), Fence.HeightForRows(2));
+                    targetFence = new Fence
+                    {
+                        Title = category,
+                        RuleCategory = category,
+                        Shade = c,
+                        Opacity = c.A,
+                        Z = _fences.Count == 0 ? 0 : _fences.Max(x => x.Z) + 1,
+                        PageIndex = _currentPage,
+                        Rect = NextFreeRect(desiredSize)
+                    };
+                    _fences.Add(targetFence);
+                }
+
+                targetFence.Items.Add(it);
+                existingPaths.Add(it.Path);
+                modifiedFences.Add(targetFence);
+                addedCount++;
+            }
+
+            if (modifiedFences.Count > 0)
+            {
+                foreach (var f in modifiedFences)
+                {
+                    f.SortItems();
+                    f.SnapHeightToRows();
+                    f.AutoArrange();
+                }
+                AutoSave(false);
+                if (!silent)
+                {
+                    SetStatus(string.Format("Desktop synced (+{0} added, -{1} removed)", addedCount, removedCount));
+                }
+                UpdateWindowRegion();
+                Invalidate();
+            }
+
+            return addedCount + removedCount;
+        }
+
         #endregion
 
         #region Launch & Portal Navigation
@@ -1685,6 +2037,20 @@ namespace Fontes
 
         void Launch(ShortcutItem it, Fence from)
         {
+            if (it.IsRecycleBin)
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "explorer.exe",
+                        Arguments = "shell:RecycleBinFolder",
+                        UseShellExecute = true
+                    });
+                }
+                catch (Exception ex) { MessageBox.Show("Could not open Recycle Bin: " + ex.Message); }
+                return;
+            }
             if (it.IsFolderPortal || (it.Path != null && Directory.Exists(it.Path)))
             {
                 try { Process.Start(new ProcessStartInfo { FileName = it.Path ?? it.Target, UseShellExecute = true }); }
@@ -1962,7 +2328,11 @@ namespace Fontes
 
             if (e.Button == MouseButtons.Right)
             {
-                ShowFenceMenu(f, e.Location);
+                var clickedItem = HitItem(f, e.Location);
+                if (clickedItem != null)
+                    ShowItemMenu(f, clickedItem, e.Location);
+                else
+                    ShowFenceMenu(f, e.Location);
                 return;
             }
 

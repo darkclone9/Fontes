@@ -142,6 +142,64 @@ namespace Fontes
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
+        const int SW_HIDE = 0;
+        const int SW_SHOW = 5;
+
+        [DllImport("user32.dll")]
+        static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool IsWindowVisible(IntPtr hWnd);
+
+        /// <summary>Locates the native Windows Explorer desktop icon list view (SysListView32 inside SHELLDLL_DefView,
+        /// hosted under either Progman or a top-level WorkerW window).</summary>
+        public static IntPtr GetDesktopIconsListView()
+        {
+            IntPtr shellDefView = IntPtr.Zero;
+            IntPtr progman = FindWindow("Progman", null);
+            if (progman != IntPtr.Zero)
+            {
+                shellDefView = FindWindowEx(progman, IntPtr.Zero, "SHELLDLL_DefView", null);
+            }
+
+            if (shellDefView == IntPtr.Zero)
+            {
+                EnumWindows((hWnd, lParam) =>
+                {
+                    IntPtr sv = FindWindowEx(hWnd, IntPtr.Zero, "SHELLDLL_DefView", null);
+                    if (sv != IntPtr.Zero)
+                    {
+                        shellDefView = sv;
+                        return false;
+                    }
+                    return true;
+                }, IntPtr.Zero);
+            }
+
+            if (shellDefView == IntPtr.Zero) return IntPtr.Zero;
+            return FindWindowEx(shellDefView, IntPtr.Zero, "SysListView32", null);
+        }
+
+        /// <summary>Non-destructively shows or hides ONLY the native Windows Explorer desktop icon list view
+        /// (SysListView32) via ShowWindow(SW_HIDE / SW_SHOW), leaving SHELLDLL_DefView, Progman, and WorkerW
+        /// untouched so Wallpaper Engine live animated wallpapers remain 100% visible.</summary>
+        public static bool SetNativeDesktopIconsVisible(bool visible)
+        {
+            IntPtr listView = GetDesktopIconsListView();
+            if (listView == IntPtr.Zero) return false;
+            ShowWindow(listView, visible ? SW_SHOW : SW_HIDE);
+            return IsWindowVisible(listView) == visible;
+        }
+
+        /// <summary>Returns true if the native Windows Explorer desktop icon list view (SysListView32) is currently visible.</summary>
+        public static bool AreNativeDesktopIconsVisible()
+        {
+            IntPtr listView = GetDesktopIconsListView();
+            if (listView == IntPtr.Zero) return false;
+            return IsWindowVisible(listView);
+        }
+
         /// <summary>Mirrors DesktopDock64.dll's FindDesktopWindowSlow: finds the WorkerW or Progman
         /// window that hosts SHELLDLL_DefView so we can anchor neatly to the desktop.</summary>
         public static IntPtr FindDesktopHostWindow()

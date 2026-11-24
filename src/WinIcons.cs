@@ -32,11 +32,54 @@ namespace Fontes
         [DllImport("user32.dll")]
         static extern bool DestroyIcon(IntPtr hIcon);
 
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct SHSTOCKICONINFO
+        {
+            public uint cbSize;
+            public IntPtr hIcon;
+            public int iSysImageIndex;
+            public int iIcon;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+            public string szPath;
+        }
+
+        [DllImport("shell32.dll", SetLastError = false)]
+        static extern int SHGetStockIconInfo(uint siid, uint uFlags, ref SHSTOCKICONINFO psii);
+
+        const uint SIID_RECYCLER = 31;
+        const uint SHGSI_ICON = 0x000000100;
+        const uint SHGSI_LARGEICON = 0x000000000;
+
         const uint SHGFI_ICON = 0x100;
         const uint SHGFI_LARGEICON = 0x0;
         const uint SHGFI_USEFILEATTRIBUTES = 0x10;
         const uint FILE_ATTRIBUTE_DIRECTORY = 0x10;
         const uint FILE_ATTRIBUTE_NORMAL = 0x80;
+
+        /// <summary>Returns the Windows Shell stock Recycle Bin icon (SIID_RECYCLER = 31).</summary>
+        public static Icon RecycleBin()
+        {
+            try
+            {
+                var sii = new SHSTOCKICONINFO { cbSize = (uint)Marshal.SizeOf(typeof(SHSTOCKICONINFO)) };
+                int hr = SHGetStockIconInfo(SIID_RECYCLER, SHGSI_ICON | SHGSI_LARGEICON, ref sii);
+                if (hr == 0 && sii.hIcon != IntPtr.Zero)
+                {
+                    try { return (Icon)Icon.FromHandle(sii.hIcon).Clone(); }
+                    finally { DestroyIcon(sii.hIcon); }
+                }
+            }
+            catch { }
+
+            string sysDir = Environment.GetFolderPath(Environment.SpecialFolder.System);
+            var fromImageres = ExtractIndexed(Path.Combine(sysDir, "imageres.dll"), 54);
+            if (fromImageres != null) return fromImageres;
+
+            var fromShell32 = ExtractIndexed(Path.Combine(sysDir, "shell32.dll"), 31);
+            if (fromShell32 != null) return fromShell32;
+
+            return Folder();
+        }
 
         public static Icon Folder()
         {

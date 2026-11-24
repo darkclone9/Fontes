@@ -29,6 +29,9 @@ namespace Fontes
         Color? _cachedTint;
 
         // Fields used by the rule engine to classify shortcuts.
+        public bool IsRecycleBin =>
+            string.Equals(Path, "shell:RecycleBinFolder", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(Target, "shell:RecycleBinFolder", StringComparison.OrdinalIgnoreCase);
         public bool IsUrl => string.Equals(PathExtension, ".url", StringComparison.OrdinalIgnoreCase);
         public bool IsLink => string.Equals(PathExtension, ".lnk", StringComparison.OrdinalIgnoreCase);
         public string PathExtension => System.IO.Path.GetExtension(Path ?? "");
@@ -49,6 +52,9 @@ namespace Fontes
         {
             try
             {
+                if (IsRecycleBin)
+                    return WinIcons.RecycleBin();
+
                 if (IsParentNavigation || IsFolderPortal || (!string.IsNullOrEmpty(Path) && Directory.Exists(Path)))
                     return WinIcons.Folder();
 

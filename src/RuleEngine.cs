@@ -107,19 +107,19 @@ namespace Fontes
             }
 
             // 2. Built-in category classification
-            if (it.IsFolderPortal || (!string.IsNullOrEmpty(it.Path) && Directory.Exists(it.Path)))
+            if (it.IsRecycleBin || it.IsFolderPortal || (!string.IsNullOrEmpty(it.Path) && Directory.Exists(it.Path)))
                 return "Folders";
 
             var ext = !string.IsNullOrEmpty(it.TargetExtension) ? it.TargetExtension : it.PathExtension;
             var name = (it.Name ?? "").ToLowerInvariant();
             var target = (it.Target ?? "").ToLowerInvariant();
 
-            if (it.IsUrl && ! target.StartsWith("steam://", StringComparison.OrdinalIgnoreCase)) return "Web";
-            if (ContainsAny(target + " " + name, GameKeywords)) return "Games";
+            if (it.IsUrl && !target.StartsWith("steam://", StringComparison.OrdinalIgnoreCase)) return "Web";
             if (ContainsAnyExt(ext, MediaExts)) return "Video";
             if (ContainsAnyExt(ext, AudioExts)) return "Audio";
             if (ContainsAnyExt(ext, ImageExts)) return "Images";
             if (ContainsAnyExt(ext, DocExts)) return "Docs";
+            if (ContainsAny(target + " " + name, GameKeywords)) return "Games";
             if (ContainsAnyExt(ext, GameExts) || it.IsLink) return "Apps";
             if (string.IsNullOrEmpty(ext)) return "Misc";
             return "Files";

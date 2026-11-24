@@ -14,6 +14,13 @@ Designed specifically for modern **multi-monitor Windows 10/11 setups running li
 - **True See-Through Desktop & Multi-Monitor Wallpaper Engine Support**:
   - Dynamically clips `MainForm.Region` to the union of the visible fences' rounded cards (`Fence.EffectiveBounds`).
   - Automatically detects composite multi-monitor `SPI_GETDESKWALLPAPER` (`WallpaperEngineOverride_*.jpg` / `TranscodedWallpaper`) images and crops only the exact target monitor sub-rectangle to render a frosted-glass blur behind each translucent fence card.
+- **Non-Destructive Native Windows Desktop Icon Hiding (`SysListView32`)**:
+  - Automatically hides the native Windows Explorer desktop icon layer (`SysListView32` inside `SHELLDLL_DefView`) while Fontes is running so desktop shortcuts never appear duplicated behind your fences, while leaving `Progman` and `WorkerW` 100% intact for Wallpaper Engine live animated wallpapers.
+  - Automatically restores native Windows desktop icons on exit, crash recovery, or via `Fontes.exe --restore-desktop-icons` (and can be toggled anytime via the **`Icons`** button in the top HUD pill or `"Show native Windows desktop icons"` in the right-click context menu).
+- **Complete Desktop Scanner (`Folders`, Loose Files & `Recycle Bin`) + Live `FileSystemWatcher` Sync**:
+  - Scans all desktop shortcuts (`.lnk`, `.url`), desktop folders (`Folders`), loose files (`.txt`, `.csv`, `.pdf`, `.md`, `.png`, `.7z`, `.bat`, `.reg`, etc.), and the built-in Windows **`Recycle Bin`** (`shell:RecycleBinFolder`).
+  - Watches User and Public Desktops in real time via `FileSystemWatcher` (`Created`, `Deleted`, `Renamed`) to automatically add new desktop files/folders into their matching category fence and remove deleted items.
+  - Right-click any item inside a fence to open its rich **Item Context Menu** (**Open / Launch**, **Open File Location in Explorer**, **Turn Folder into Folder Portal Fence**, **Move to Fence ▸**, **Remove from Fence**, and **Fence Options ▸**).
 - **Auto-Hiding Top-Center HUD Pill & System Tray Icon**:
   - The top-center HUD pill stays tucked out of sight while you work in maximized apps and smoothly appears when you move your cursor to the top-center edge of the desktop.
 - **Per-Fence Live Search & Interactive Title Bar Controls**:
@@ -50,7 +57,7 @@ Designed specifically for modern **multi-monitor Windows 10/11 setups running li
 Fontes uses an SDK-style `Fontes.csproj` targeting `.NET Framework 4.8` (`net48`) with zero external NuGet dependencies:
 
 ```powershell
-# Build Fontes.exe and run the 12 automated self-tests
+# Build Fontes.exe and run the 14 automated self-tests
 powershell -ExecutionPolicy Bypass -File .\build.ps1
 
 # Launch Fontes

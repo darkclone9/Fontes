@@ -33,3 +33,13 @@
   - Snap fence heights to row boundaries (`SnapHeightToRows()`) after creation, layout migration, and user resize operations, and scroll by `CellSize` steps so icon cells are never sliced in half vertically.
 - **Prune Empty Welcome/Placeholder Fences**:
   - Automatically remove 0-item default placeholder fences (such as empty `"Web & Docs"` fences when `AutoOrganize()` creates `"Web"` and `"Docs"`) during `AutoOrganize()` and layout loading.
+
+## 5. Non-Destructive `SysListView32` Native Desktop Icon Hiding & Complete Desktop Sync
+- **Hide ONLY `SysListView32` — Never Hide `SHELLDLL_DefView`, `Progman`, or `WorkerW`**:
+  - Wallpaper Engine renders its live animated wallpaper surface inside `Progman` / `WorkerW`. Hiding `SHELLDLL_DefView`, `Progman`, or `WorkerW` blacks out or freezes live animated wallpapers.
+  - Always locate `SHELLDLL_DefView` (under `Progman` or top-level `WorkerW` via `FindWindowEx`) and then target ONLY its child `SysListView32` (`FindWindowEx(shellDefView, IntPtr.Zero, "SysListView32", null)`) with `ShowWindow(hListView, SW_HIDE / SW_SHOW)`.
+  - Periodically verify `AreNativeDesktopIconsVisible()` on `_uiTimer.Tick` while `_hideNativeDesktopIcons` is active so that if `explorer.exe` restarts, `SysListView32` is automatically re-hidden.
+  - Guarantee restoration (`SetNativeDesktopIconsVisible(true)`) on `MainForm.FormClosing`, `AppDomain.CurrentDomain.ProcessExit`, `UnhandledException`, `Application.ThreadException`, and via the `--restore-desktop-icons` CLI flag.
+- **Complete Desktop Scanning (`Folders`, Loose Files, and `Recycle Bin`) & Live `FileSystemWatcher` Sync**:
+  - `DesktopScanner.Scan()` must enumerate non-hidden/non-system directories (`Category = "Folders"`), loose files (skipping `desktop.ini`, `thumbs.db`, `*.tmp`, and `~$*` Office lock files), and the built-in Windows `Recycle Bin` (`shell:RecycleBinFolder`, using `SHGetStockIconInfo` with `SIID_RECYCLER = 31`).
+  - Maintain `FileSystemWatcher` instances on both `SpecialFolder.DesktopDirectory` and `SpecialFolder.CommonDesktopDirectory` (`Created`, `Deleted`, `Renamed`) and debounce `SyncDesktopChanges()` on the UI timer so newly created, renamed, or deleted desktop items sync into fences automatically without resetting custom fence positions.
