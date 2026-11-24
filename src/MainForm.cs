@@ -67,6 +67,7 @@ namespace Fontes
         ShortcutItem _pressedItem;
         Fence _pressedItemFence;
         Point _mouseDownLoc;
+        Point _dragItemLocation;
         bool _isDraggingItem;
         ShortcutItem _hoveredItem;
         Fence _hoveredFence;
@@ -75,6 +76,7 @@ namespace Fontes
 
         // Drag-to-create fence on empty desktop (CreateFenceWithMouseMode)
         bool _isDrawingNewFence;
+        bool _drawFenceMoveQueued;
         Point _drawFenceStart;
         Rectangle _drawFenceRect;
         IntPtr _drawFenceHook = IntPtr.Zero;
@@ -103,6 +105,15 @@ namespace Fontes
                 int next = Math.Max(0, Math.Min(MaxPages - 1, value));
                 if (_currentPage != next)
                 {
+                    if (_drawFenceMode || _isDrawingNewFence)
+                    {
+                        _drawFenceMode = false;
+                        _isDrawingNewFence = false;
+                        _drawFenceMoveQueued = false;
+                        _drawFenceRect = Rectangle.Empty;
+                        UninstallDrawFenceHook();
+                        Cursor = Cursors.Default;
+                    }
                     _currentPage = next;
                     _hoveredFence = null;
                     _hoveredItem = null;
@@ -366,7 +377,7 @@ namespace Fontes
 
             if (_isDraggingItem && _pressedItem != null)
             {
-                Point cur = PointToClient(Cursor.Position);
+                Point cur = _dragItemLocation;
                 using (var dragPath = Rounded(new Rectangle(cur.X - 20, cur.Y - 20, 41, 41), 8))
                 {
                     reg.Union(dragPath);
@@ -549,13 +560,23 @@ namespace Fontes
             Invalidate();
         }
 
-        void ToggleDrawFenceMode()
+        public bool IsDrawFenceHookInstalled => _drawFenceHook != IntPtr.Zero;
+
+        public void ToggleDrawFenceMode()
         {
             _drawFenceMode = !_drawFenceMode;
             _isDrawingNewFence = false;
+            _drawFenceMoveQueued = false;
             _drawFenceRect = Rectangle.Empty;
-            if (_drawFenceMode) InstallDrawFenceHook();
-            else UninstallDrawFenceHook();
+            if (_drawFenceMode)
+            {
+                InstallDrawFenceHook();
+                if (IsHandleCreated && !IsDisposed) Activate();
+            }
+            else
+            {
+                UninstallDrawFenceHook();
+            }
             Cursor = _drawFenceMode ? Cursors.Cross : Cursors.Default;
             UpdateWindowRegion();
             Invalidate();
@@ -578,10 +599,11 @@ namespace Fontes
             }
         }
 
-        void FinishDrawFenceMode()
+        void FinishDrawFenceMode(Rectangle? finalRectOverride = null)
         {
-            var rect = _drawFenceRect;
+            var rect = finalRectOverride ?? _drawFenceRect;
             _isDrawingNewFence = false;
+            _drawFenceMoveQueued = false;
             _drawFenceMode = false;
             _drawFenceRect = Rectangle.Empty;
             UninstallDrawFenceHook();
@@ -600,53 +622,76 @@ namespace Fontes
             if (nCode >= 0 && _drawFenceMode && IsHandleCreated && !IsDisposed)
             {
                 int msg = wParam.ToInt32();
-                var info = (DesktopHost.MSLLHOOKSTRUCT)System.Runtime.InteropServices.Marshal.PtrToStructure(
-                    lParam, typeof(DesktopHost.MSLLHOOKSTRUCT));
-                Point clientPt = PointToClient(new Point(info.pt.x, info.pt.y));
-
                 if (msg == DesktopHost.WM_RBUTTONDOWN)
                 {
+                    _isDrawingNewFence = false;
+                    _drawFenceMoveQueued = false;
                     BeginInvoke((Action)(() =>
                     {
                         if (_drawFenceMode) ToggleDrawFenceMode();
                     }));
                     return new IntPtr(1);
                 }
-                if (msg == DesktopHost.WM_LBUTTONDOWN)
+                if (msg == DesktopHost.WM_LBUTTONDOWN ||
+                    (msg == DesktopHost.WM_MOUSEMOVE && _isDrawingNewFence) ||
+                    (msg == DesktopHost.WM_LBUTTONUP && _isDrawingNewFence))
                 {
-                    bool onHud = IsHudExpanded && GetHudPillBounds().Contains(clientPt);
-                    bool onToast = IsStatusToastVisible && GetStatusPillBounds().Contains(clientPt);
-                    if (!onHud && !onToast && ClientRectangle.Contains(clientPt))
+                    var info = (DesktopHost.MSLLHOOKSTRUCT)System.Runtime.InteropServices.Marshal.PtrToStructure(
+                        lParam, typeof(DesktopHost.MSLLHOOKSTRUCT));
+                    Point clientPt = new Point(info.pt.x - Bounds.X, info.pt.y - Bounds.Y);
+
+                    if (msg == DesktopHost.WM_LBUTTONDOWN)
                     {
-                        _isDrawingNewFence = true;
-                        _drawFenceStart = clientPt;
-                        _drawFenceRect = new Rectangle(clientPt.X, clientPt.Y, 1, 1);
-                        BeginInvoke((Action)(() =>
+                        bool onHud = IsHudExpanded && GetHudPillBounds().Contains(clientPt);
+                        bool onToast = IsStatusToastVisible && GetStatusPillBounds().Contains(clientPt);
+                        if (!onHud && !onToast && ClientRectangle.Contains(clientPt))
                         {
-                            UpdateWindowRegion();
-                            Invalidate();
-                        }));
+                            _isDrawingNewFence = true;
+                            _drawFenceMoveQueued = false;
+                            _drawFenceStart = clientPt;
+                            _drawFenceRect = new Rectangle(clientPt.X, clientPt.Y, 1, 1);
+                            BeginInvoke((Action)(() =>
+                            {
+                                if (!IsDisposed && IsHandleCreated)
+                                {
+                                    Activate();
+                                    Invalidate();
+                                    UpdateWindowRegion();
+                                }
+                            }));
+                            return new IntPtr(1);
+                        }
+                    }
+                    else if (msg == DesktopHost.WM_MOUSEMOVE && _isDrawingNewFence)
+                    {
+                        int x = Math.Min(_drawFenceStart.X, clientPt.X);
+                        int y = Math.Max(0, Math.Min(_drawFenceStart.Y, clientPt.Y));
+                        int w = Math.Abs(clientPt.X - _drawFenceStart.X);
+                        int h = Math.Abs(clientPt.Y - _drawFenceStart.Y);
+                        _drawFenceRect = new Rectangle(x, y, w, h);
+                        if (!_drawFenceMoveQueued)
+                        {
+                            _drawFenceMoveQueued = true;
+                            BeginInvoke((Action)(() =>
+                            {
+                                _drawFenceMoveQueued = false;
+                                if (!IsDisposed && IsHandleCreated && _isDrawingNewFence)
+                                {
+                                    Invalidate();
+                                    UpdateWindowRegion();
+                                    Update();
+                                }
+                            }));
+                        }
+                    }
+                    else if (msg == DesktopHost.WM_LBUTTONUP && _isDrawingNewFence)
+                    {
+                        var finalRect = _drawFenceRect;
+                        _isDrawingNewFence = false;
+                        _drawFenceMoveQueued = false;
+                        BeginInvoke((Action)(() => FinishDrawFenceMode(finalRect)));
                         return new IntPtr(1);
                     }
-                }
-                else if (msg == DesktopHost.WM_MOUSEMOVE && _isDrawingNewFence)
-                {
-                    int x = Math.Min(_drawFenceStart.X, clientPt.X);
-                    int y = Math.Max(0, Math.Min(_drawFenceStart.Y, clientPt.Y));
-                    int w = Math.Abs(clientPt.X - _drawFenceStart.X);
-                    int h = Math.Abs(clientPt.Y - _drawFenceStart.Y);
-                    _drawFenceRect = new Rectangle(x, y, w, h);
-                    BeginInvoke((Action)(() =>
-                    {
-                        UpdateWindowRegion();
-                        Invalidate();
-                        Update();
-                    }));
-                }
-                else if (msg == DesktopHost.WM_LBUTTONUP && _isDrawingNewFence)
-                {
-                    BeginInvoke((Action)FinishDrawFenceMode);
-                    return new IntPtr(1);
                 }
             }
             return DesktopHost.CallNextHookEx(_drawFenceHook, nCode, wParam, lParam);
@@ -1746,6 +1791,7 @@ namespace Fontes
         {
             base.OnMouseDown(e);
             _mouseDownLoc = e.Location;
+            _dragItemLocation = e.Location;
             _snapGuides.Clear();
 
             if (e.Button != MouseButtons.Left && e.Button != MouseButtons.Right)
@@ -1783,11 +1829,15 @@ namespace Fontes
                     else CanvasMenu.Show(this, e.Location);
                     return;
                 }
-                if (_quickHide)
+                if (_drawFenceMode)
+                {
+                    ToggleDrawFenceMode();
+                }
+                else if (_quickHide)
                 {
                     ToggleQuickHide();
                 }
-                else if (!_drawFenceMode && !_peek)
+                else if (!_peek)
                 {
                     _statusUntil = DateTime.MinValue;
                     UpdateWindowRegion();
@@ -1828,8 +1878,13 @@ namespace Fontes
                 return;
             }
 
-            // Bring clicked fence to front
-            f.Z = _fences.Count > 0 ? _fences.Max(x => x.Z) + 1 : 0;
+            // Bring clicked fence to front if it wasn't already at the top of Z-order
+            int maxZ = _fences.Count > 0 ? _fences.Max(x => x.Z) : 0;
+            if (f.Z < maxZ)
+            {
+                f.Z = maxZ + 1;
+                Invalidate(f.EffectiveBounds);
+            }
 
             if (e.Button == MouseButtons.Right)
             {
@@ -1875,7 +1930,7 @@ namespace Fontes
                 return;
             }
 
-            // Left button on resize edge (wait until mouse moves >2px before expanding full-screen region)
+            // Left button on resize edge (wait until mouse moves >2px before resizing)
             var edge = HitEdge(f, e.Location);
             if (edge != ResizeEdge.None)
             {
@@ -1917,10 +1972,14 @@ namespace Fontes
                 int y = Math.Max(0, Math.Min(_drawFenceStart.Y, e.Y));
                 int w = Math.Abs(e.X - _drawFenceStart.X);
                 int h = Math.Abs(e.Y - _drawFenceStart.Y);
-                _drawFenceRect = new Rectangle(x, y, w, h);
-                UpdateWindowRegion();
-                Invalidate();
-                Update();
+                var nextRect = new Rectangle(x, y, w, h);
+                if (nextRect != _drawFenceRect)
+                {
+                    _drawFenceRect = nextRect;
+                    Invalidate();
+                    UpdateWindowRegion();
+                    Update();
+                }
                 return;
             }
 
@@ -1933,11 +1992,15 @@ namespace Fontes
                 }
                 if (_dragResize)
                 {
+                    var oldRect = _dragFence.Rect;
                     ApplyResize(_dragFence, e.Location);
-                    _dragFence.AutoArrange();
-                    UpdateWindowRegion();
-                    Invalidate();
-                    Update();
+                    if (_dragFence.Rect != oldRect)
+                    {
+                        _dragFence.AutoArrange();
+                        Invalidate();
+                        UpdateWindowRegion();
+                        Update();
+                    }
                 }
                 return;
             }
@@ -1953,14 +2016,20 @@ namespace Fontes
 
             if (_dragMove && _dragFence != null)
             {
+                var oldRect = _dragFence.Rect;
+                int oldGuideCount = _snapGuides.Count;
                 var r = _dragFence.Rect;
                 r.X = Math.Max(0, Math.Min(Width - 60, e.Location.X - _dragOffset.X));
                 r.Y = Math.Max(0, Math.Min(Height - 28, e.Location.Y - _dragOffset.Y));
-                _dragFence.Rect = ApplyMagneticSnap(_dragFence, r);
-                _dragFence.AutoArrange();
-                UpdateWindowRegion();
-                Invalidate();
-                Update();
+                var snapped = ApplyMagneticSnap(_dragFence, r);
+                if (snapped != oldRect || _snapGuides.Count != oldGuideCount)
+                {
+                    _dragFence.Rect = snapped;
+                    _dragFence.AutoArrange();
+                    Invalidate();
+                    UpdateWindowRegion();
+                    Update();
+                }
                 return;
             }
 
@@ -1969,12 +2038,16 @@ namespace Fontes
             {
                 int dx = Math.Abs(e.X - _mouseDownLoc.X);
                 int dy = Math.Abs(e.Y - _mouseDownLoc.Y);
-                if (dx > SystemInformation.DragSize.Width || dy > SystemInformation.DragSize.Height)
+                if (!_isDraggingItem && (dx > SystemInformation.DragSize.Width || dy > SystemInformation.DragSize.Height))
                 {
                     _isDraggingItem = true;
                     Cursor = Cursors.Hand;
-                    UpdateWindowRegion();
+                }
+                if (_isDraggingItem && _dragItemLocation != e.Location)
+                {
+                    _dragItemLocation = e.Location;
                     Invalidate();
+                    UpdateWindowRegion();
                     Update();
                 }
                 return;
@@ -2120,6 +2193,7 @@ namespace Fontes
                 }
             }
 
+            bool wasMoveOrResize = _dragMove || _dragResize || _snapGuides.Count > 0;
             if (_dragMove || _dragResize)
             {
                 if (_dragResize && _dragFence != null)
@@ -2132,8 +2206,20 @@ namespace Fontes
             }
 
             ResetInteractionState();
-            UpdateWindowRegion();
-            Invalidate();
+            if (wasMoveOrResize)
+            {
+                Invalidate();
+                UpdateWindowRegion();
+            }
+        }
+
+        public void SimulateMouseDown(MouseEventArgs e) => OnMouseDown(e);
+        public void SimulateMouseMove(MouseEventArgs e) => OnMouseMove(e);
+        public void SimulateMouseUp(MouseEventArgs e) => OnMouseUp(e);
+        public bool SimulateCmdKey(Keys keyData)
+        {
+            var msg = new Message();
+            return ProcessCmdKey(ref msg, keyData);
         }
 
         protected override void OnMouseCaptureChanged(EventArgs e)
@@ -2216,6 +2302,15 @@ namespace Fontes
 
         public void ToggleQuickHide()
         {
+            if (_drawFenceMode || _isDrawingNewFence)
+            {
+                _drawFenceMode = false;
+                _isDrawingNewFence = false;
+                _drawFenceMoveQueued = false;
+                _drawFenceRect = Rectangle.Empty;
+                UninstallDrawFenceHook();
+                Cursor = Cursors.Default;
+            }
             _quickHide = !_quickHide;
             SetStatus(_quickHide ? "Fences hidden (click Show or double-click tray icon)" : "Fences restored");
             UpdateWindowRegion();
@@ -2367,7 +2462,11 @@ namespace Fontes
             if (!_peek && !_quickHide)
             {
                 foreach (var f in ActivePageFences.OrderBy(x => x.Z))
+                {
+                    if (!e.ClipRectangle.IsEmpty && !e.ClipRectangle.IntersectsWith(f.EffectiveBounds))
+                        continue;
                     PaintFence(g, f);
+                }
             }
 
             PaintHudPill(g);
@@ -2399,7 +2498,7 @@ namespace Fontes
             // Paint dragged item ghost tile
             if (_isDraggingItem && _pressedItem != null)
             {
-                var cur = PointToClient(Cursor.Position);
+                var cur = _dragItemLocation;
                 var tileRect = new Rectangle(cur.X - 20, cur.Y - 20, 40, 40);
                 using (var tp = Rounded(tileRect, 8))
                 using (var tb = new SolidBrush(Color.FromArgb(235, 28, 34, 48)))

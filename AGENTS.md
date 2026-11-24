@@ -10,11 +10,11 @@
   - When `_drawFenceMode` is active, use a temporary low-level mouse hook (`WH_MOUSE_LL`) only for the duration of `_drawFenceMode` to catch the initial desktop click/drag without expanding `MainForm.Region` to full screen.
   - Never paint `SPI_GETDESKWALLPAPER` (`GetFrostedDesktopWallpaper` / `GetDesktopWallpaper`) inside live `PaintFence`, `PaintHudPill`, or `OnPaint`, because the static disk image often mismatches the active live Wallpaper Engine scene. Render rich dark-glass card gradients (`LinearGradientBrush` derived from `Fence.Shade` and `Fence.Opacity` with a top specular glass sheen and dual inner/outer borders) instead.
 
-## 4. Vector Header Action Glyphs & Proportional Horizontal Layout Sizing
+## 4. Vector Header Action Glyphs & Column-Aligned Proportional Horizontal Layout Sizing
 - **Never rely on Unicode `\u2315` (`TELEPHONE RECORDER`) in `Segoe UI` for the header Search button**:
   - `Segoe UI` lacks a glyph for `U+2315` and renders a missing-glyph rectangle box (`▯`). Always render fence header buttons (Search magnifying glass, Roll-up/Roll-down chevrons, Close `×`) using anti-aliased GDI+ vector primitives (`DrawEllipse`, `DrawLine`, `DrawLines`).
-- **Proportional Horizontal Layout Widths**:
-  - When applying a `"Horizontal"` `FencesLayoutArea` (such as a bottom dock preset), size small fences (`Items.Count < equalCols * rows`) to their natural column width (`Fence.WidthForColumns(Math.Max(3, colsNeeded))`) and distribute the remaining horizontal width proportionally across high-item-count fences.
+- **Column-Aligned Proportional Horizontal Layout Widths**:
+  - When applying a `"Horizontal"` `FencesLayoutArea` (such as a bottom dock preset), size small fences (`Items.Count < equalCols * rows`) to their natural column width (`Fence.WidthForColumns(Math.Max(3, colsNeeded))`) and allocate the remaining horizontal width across high-item-count fences in whole icon columns (`Fence.CellSize = 92`) first before distributing leftover pixel remainders, preventing large fences from falling 1–2 pixels short of a column boundary.
 
 ## 2. `.url` & `.lnk` Shortcut Icon Extraction Rules
 - **Never use `SystemIcons.Shield` as a fallback icon for `.url` or web shortcuts**:

@@ -312,9 +312,10 @@ namespace Fontes
                 }
             }
 
-            // Migrate v3 equal-width (w=666) horizontal bottom dock layouts to v4 proportional horizontal widths
-            if (path == null && !string.Equals(layoutVersion, "4", StringComparison.Ordinal) && list.Count > 1 &&
-                list.All(x => x.Rect.Width == 666) && list.Any(x => x.Items.Count <= 4) && list.Any(x => x.Items.Count >= 20))
+            // Migrate v3 equal-width (w=666) or unaligned 9-col (w=938) horizontal bottom dock layouts to column-aligned proportional horizontal widths
+            if (path == null && list.Count > 1 &&
+                (list.All(x => x.Rect.Width == 666) || list.Any(x => x.Rect.Width == 938)) &&
+                list.Any(x => x.Items.Count <= 4) && list.Any(x => x.Items.Count >= 20))
             {
                 var bottomTpl = new FencesLayoutTemplate
                 {
@@ -489,21 +490,32 @@ namespace Fontes
                     if (flexibleIndices.Count > 0)
                     {
                         double totalWeight = flexibleIndices.Sum(idx => Math.Max(1.0, Math.Sqrt(Math.Max(1, bucket[idx].Items.Count))));
-                        int distributed = 0;
+                        int padTotal = flexibleIndices.Count * (Fence.SidePad * 2);
+                        int availCellPx = Math.Max(flexibleIndices.Count * 3 * Fence.CellSize, remainingW - padTotal);
+                        int totalFlexCols = Math.Max(flexibleIndices.Count * 3, availCellPx / Fence.CellSize);
+                        int extraPx = Math.Max(0, remainingW - (padTotal + totalFlexCols * Fence.CellSize));
+
+                        int colsDistributed = 0;
+                        int extraDistributed = 0;
                         for (int k = 0; k < flexibleIndices.Count; k++)
                         {
                             int idx = flexibleIndices[k];
+                            int cols;
+                            int extra;
                             if (k == flexibleIndices.Count - 1)
                             {
-                                slotWidths[idx] = Math.Max(Fence.WidthForColumns(3), remainingW - distributed);
+                                cols = Math.Max(3, totalFlexCols - colsDistributed);
+                                extra = Math.Max(0, extraPx - extraDistributed);
                             }
                             else
                             {
                                 double weight = Math.Max(1.0, Math.Sqrt(Math.Max(1, bucket[idx].Items.Count)));
-                                int w = Math.Max(Fence.WidthForColumns(3), (int)Math.Round(remainingW * (weight / totalWeight)));
-                                slotWidths[idx] = w;
-                                distributed += w;
+                                cols = Math.Max(3, (int)Math.Round(totalFlexCols * (weight / totalWeight)));
+                                extra = extraPx / flexibleIndices.Count;
+                                colsDistributed += cols;
+                                extraDistributed += extra;
                             }
+                            slotWidths[idx] = Fence.SidePad * 2 + cols * Fence.CellSize + extra;
                         }
                     }
                     else

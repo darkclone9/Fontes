@@ -234,18 +234,90 @@ namespace Fontes
                 if (loadedPage.Count != 1 || loadedPage[0].PageIndex != 2)
                     throw new Exception("XmlStore failed to persist Fence.PageIndex.");
 
-                using (var testForm = new MainForm())
+                string origLayoutXml = File.Exists(XmlStore.DefaultPath) ? File.ReadAllText(XmlStore.DefaultPath) : null;
+                try
                 {
-                    if (testForm.ShowInTaskbar)
-                        throw new Exception("MainForm.ShowInTaskbar must be false so Fontes never appears on the Windows taskbar.");
-                    IntPtr h = testForm.Handle; // Force handle creation & OnHandleCreated -> UpdateWindowRegion()
-                    if (testForm.Region == null)
-                        throw new Exception("MainForm.Region must never be null (must stay tightly clipped to fences + HUD).");
-                    testForm.UpdateWindowRegion();
-                    if (testForm.Region == null)
-                        throw new Exception("MainForm.UpdateWindowRegion() set Region to null.");
+                    using (var testForm = new MainForm())
+                    {
+                        if (testForm.ShowInTaskbar)
+                            throw new Exception("MainForm.ShowInTaskbar must be false so Fontes never appears on the Windows taskbar.");
+                        IntPtr h = testForm.Handle; // Force handle creation & OnHandleCreated -> UpdateWindowRegion()
+                        if (testForm.Region == null)
+                            throw new Exception("MainForm.Region must never be null (must stay tightly clipped to fences + HUD).");
+                        testForm.UpdateWindowRegion();
+                        if (testForm.Region == null)
+                            throw new Exception("MainForm.UpdateWindowRegion() set Region to null.");
+
+                        // Verify interactive fence move, fence resize, item drag (including return near origin), and Draw-Fence hook lifecycle never set Region = null
+                        var f0 = testForm.Fences.FirstOrDefault(x => x.PageIndex == testForm.CurrentPage);
+                        if (f0 != null)
+                        {
+                            var origRect = f0.Rect;
+                            // 10a. Fence move drag
+                            Point titlePt = new Point(origRect.X + 40, origRect.Y + 12);
+                            testForm.SimulateMouseDown(new MouseEventArgs(MouseButtons.Left, 1, titlePt.X, titlePt.Y, 0));
+                            testForm.SimulateMouseMove(new MouseEventArgs(MouseButtons.Left, 1, titlePt.X + 24, titlePt.Y + 24, 0));
+                            if (testForm.Region == null)
+                                throw new Exception("MainForm.Region became null during fence move drag.");
+                            testForm.SimulateMouseUp(new MouseEventArgs(MouseButtons.Left, 1, titlePt.X + 24, titlePt.Y + 24, 0));
+                            if (testForm.Region == null)
+                                throw new Exception("MainForm.Region became null after fence move MouseUp.");
+
+                            // 10b. Fence resize drag
+                            var curRect = f0.Rect;
+                            Point sePt = new Point(curRect.Right - 1, curRect.Bottom - 1);
+                            testForm.SimulateMouseDown(new MouseEventArgs(MouseButtons.Left, 1, sePt.X, sePt.Y, 0));
+                            testForm.SimulateMouseMove(new MouseEventArgs(MouseButtons.Left, 1, sePt.X + 30, sePt.Y + 30, 0));
+                            if (testForm.Region == null)
+                                throw new Exception("MainForm.Region became null during fence resize drag.");
+                            testForm.SimulateMouseUp(new MouseEventArgs(MouseButtons.Left, 1, sePt.X + 30, sePt.Y + 30, 0));
+
+                            f0.Rect = origRect;
+                            f0.AutoArrange();
+                            testForm.UpdateWindowRegion();
+
+                            // 10c. Item drag (out beyond DragSize and back within DragSize of origin)
+                            if (f0.FilteredItems.Count > 0)
+                            {
+                                var item0 = f0.FilteredItems[0];
+                                var cell0 = f0.ItemCellRect(item0);
+                                Point itemPt = new Point(cell0.X + cell0.Width / 2, cell0.Y + cell0.Height / 2);
+                                Point farPt = new Point(400, 300);
+                                Point nearOriginPt = new Point(itemPt.X + 1, itemPt.Y + 1);
+                                testForm.SimulateMouseDown(new MouseEventArgs(MouseButtons.Left, 1, itemPt.X, itemPt.Y, 0));
+                                testForm.SimulateMouseMove(new MouseEventArgs(MouseButtons.Left, 1, farPt.X, farPt.Y, 0));
+                                if (testForm.Region == null || !testForm.Region.IsVisible(farPt))
+                                    throw new Exception("MainForm.Region failed to include dragged item ghost tile at farPt.");
+                                testForm.SimulateMouseMove(new MouseEventArgs(MouseButtons.Left, 1, nearOriginPt.X, nearOriginPt.Y, 0));
+                                if (testForm.Region == null || !testForm.Region.IsVisible(nearOriginPt))
+                                    throw new Exception("MainForm.Region failed to update dragged item ghost tile when dragged back within DragSize of origin.");
+                                testForm.SimulateMouseUp(new MouseEventArgs(MouseButtons.Left, 1, nearOriginPt.X, nearOriginPt.Y, 0));
+                            }
+                        }
+
+                        // 10d. Draw-Fence mode WH_MOUSE_LL hook install, rubber-band region union, and Esc cancel cleanup
+                        testForm.ToggleDrawFenceMode();
+                        if (!testForm.IsDrawFenceHookInstalled)
+                            throw new Exception("ToggleDrawFenceMode failed to install WH_MOUSE_LL hook.");
+                        if (testForm.Region == null)
+                            throw new Exception("MainForm.Region became null upon entering Draw-Fence mode.");
+                        testForm.SimulateMouseDown(new MouseEventArgs(MouseButtons.Left, 1, 200, 200, 0));
+                        testForm.SimulateMouseMove(new MouseEventArgs(MouseButtons.Left, 1, 360, 320, 0));
+                        if (testForm.Region == null || !testForm.Region.IsVisible(new Point(280, 260)))
+                            throw new Exception("MainForm.Region failed to union rubber-band _drawFenceRect during Draw-Fence drag.");
+                        testForm.SimulateCmdKey(Keys.Escape);
+                        if (testForm.IsDrawFenceHookInstalled)
+                            throw new Exception("Esc failed to uninstall WH_MOUSE_LL hook in Draw-Fence mode.");
+                        if (testForm.Region == null)
+                            throw new Exception("MainForm.Region became null after cancelling Draw-Fence mode.");
+                    }
                 }
-                Console.WriteLine("[PASS] Taskbar-free ShowInTaskbar=false, non-null clipped MainForm.Region, per-fence SearchFilter, and Desktop Pages verified.");
+                finally
+                {
+                    if (origLayoutXml != null)
+                        File.WriteAllText(XmlStore.DefaultPath, origLayoutXml);
+                }
+                Console.WriteLine("[PASS] Taskbar-free ShowInTaskbar=false, non-null clipped MainForm.Region across move/resize/item-drag/draw-fence, WH_MOUSE_LL hook lifecycle, per-fence SearchFilter, and Desktop Pages verified.");
 
                 // 11. Test Vector Header Action Buttons (Search magnifying glass, RollUp/RollDown chevrons, Close X)
                 using (var btnBmp = new Bitmap(80, 24))
@@ -259,7 +331,7 @@ namespace Fontes
                 }
                 Console.WriteLine("[PASS] Vector GDI+ header action buttons (Search, RollUp, RollDown, Close) verified.");
 
-                // 12. Test Left-Aligned Partial-Row AutoArrange & Proportional Horizontal Layout Widths
+                // 12. Test Left-Aligned Partial-Row AutoArrange & Column-Aligned Proportional Horizontal Layout Widths
                 var bigApps = new Fence { Title = "Apps", Items = Enumerable.Range(0, 152).Select(i => new ShortcutItem { Name = "A" + i }).ToList() };
                 var bigGames = new Fence { Title = "Games", Items = Enumerable.Range(0, 100).Select(i => new ShortcutItem { Name = "G" + i }).ToList() };
                 var smallWeb = new Fence { Title = "Web", Items = Enumerable.Range(0, 3).Select(i => new ShortcutItem { Name = "W" + i }).ToList() };
@@ -270,11 +342,11 @@ namespace Fontes
                     Areas = { new FencesLayoutArea { Alignment = "BottomRight", Orientation = "Horizontal", Width = 1.0, Height = 0.24 } }
                 };
                 XmlStore.ApplyFencesLayout(horizList, bottomTpl, new Rectangle(0, 0, 2048, 1104), MainForm.ToolbarH);
-                if (smallWeb.Rect.Width != Fence.WidthForColumns(3))
-                    throw new Exception("Expected 3-item Web fence in horizontal layout to have WidthForColumns(3)=" + Fence.WidthForColumns(3) + ", got " + smallWeb.Rect.Width);
-                if (bigApps.Rect.Width <= smallWeb.Rect.Width || bigGames.Rect.Width <= smallWeb.Rect.Width)
-                    throw new Exception("Expected large Apps/Games fences to receive proportional extra width in horizontal layout.");
-                Console.WriteLine("[PASS] Proportional horizontal layout widths (Apps=" + bigApps.Rect.Width + "px, Games=" + bigGames.Rect.Width + "px, Web=" + smallWeb.Rect.Width + "px) verified.");
+                if (smallWeb.Rect.Width != Fence.WidthForColumns(3) || smallWeb.Columns != 3)
+                    throw new Exception("Expected 3-item Web fence in horizontal layout to have WidthForColumns(3)=" + Fence.WidthForColumns(3) + " (3 cols), got " + smallWeb.Rect.Width);
+                if (bigApps.Columns != 10 || bigGames.Columns != 8)
+                    throw new Exception("Expected column-aligned proportional horizontal layout to fit 10 cols in Apps and 8 cols in Games (got Apps=" + bigApps.Columns + " cols / " + bigApps.Rect.Width + "px, Games=" + bigGames.Columns + " cols / " + bigGames.Rect.Width + "px).");
+                Console.WriteLine("[PASS] Column-aligned proportional horizontal layout widths (Apps=" + bigApps.Rect.Width + "px [10 cols], Games=" + bigGames.Rect.Width + "px [8 cols], Web=" + smallWeb.Rect.Width + "px [3 cols]) verified.");
 
                 Console.WriteLine("=== ALL SELF-TESTS PASSED ===");
                 return 0;
