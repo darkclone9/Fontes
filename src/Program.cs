@@ -238,8 +238,43 @@ namespace Fontes
                 {
                     if (testForm.ShowInTaskbar)
                         throw new Exception("MainForm.ShowInTaskbar must be false so Fontes never appears on the Windows taskbar.");
+                    IntPtr h = testForm.Handle; // Force handle creation & OnHandleCreated -> UpdateWindowRegion()
+                    if (testForm.Region == null)
+                        throw new Exception("MainForm.Region must never be null (must stay tightly clipped to fences + HUD).");
+                    testForm.UpdateWindowRegion();
+                    if (testForm.Region == null)
+                        throw new Exception("MainForm.UpdateWindowRegion() set Region to null.");
                 }
-                Console.WriteLine("[PASS] Taskbar-free ShowInTaskbar=false, per-fence SearchFilter, and Desktop Pages verified.");
+                Console.WriteLine("[PASS] Taskbar-free ShowInTaskbar=false, non-null clipped MainForm.Region, per-fence SearchFilter, and Desktop Pages verified.");
+
+                // 11. Test Vector Header Action Buttons (Search magnifying glass, RollUp/RollDown chevrons, Close X)
+                using (var btnBmp = new Bitmap(80, 24))
+                using (var g = Graphics.FromImage(btnBmp))
+                {
+                    g.Clear(Color.FromArgb(20, 22, 28));
+                    MainForm.DrawHeaderActionButton(g, new Rectangle(0, 2, 20, 20), MainForm.HeaderButtonKind.Search, true, false);
+                    MainForm.DrawHeaderActionButton(g, new Rectangle(20, 2, 20, 20), MainForm.HeaderButtonKind.RollUp, false, false);
+                    MainForm.DrawHeaderActionButton(g, new Rectangle(40, 2, 20, 20), MainForm.HeaderButtonKind.RollDown, false, false);
+                    MainForm.DrawHeaderActionButton(g, new Rectangle(60, 2, 20, 20), MainForm.HeaderButtonKind.Close, true, true);
+                }
+                Console.WriteLine("[PASS] Vector GDI+ header action buttons (Search, RollUp, RollDown, Close) verified.");
+
+                // 12. Test Left-Aligned Partial-Row AutoArrange & Proportional Horizontal Layout Widths
+                var bigApps = new Fence { Title = "Apps", Items = Enumerable.Range(0, 152).Select(i => new ShortcutItem { Name = "A" + i }).ToList() };
+                var bigGames = new Fence { Title = "Games", Items = Enumerable.Range(0, 100).Select(i => new ShortcutItem { Name = "G" + i }).ToList() };
+                var smallWeb = new Fence { Title = "Web", Items = Enumerable.Range(0, 3).Select(i => new ShortcutItem { Name = "W" + i }).ToList() };
+                var horizList = new List<Fence> { bigApps, bigGames, smallWeb };
+                var bottomTpl = new FencesLayoutTemplate
+                {
+                    Name = "Bottom",
+                    Areas = { new FencesLayoutArea { Alignment = "BottomRight", Orientation = "Horizontal", Width = 1.0, Height = 0.24 } }
+                };
+                XmlStore.ApplyFencesLayout(horizList, bottomTpl, new Rectangle(0, 0, 2048, 1104), MainForm.ToolbarH);
+                if (smallWeb.Rect.Width != Fence.WidthForColumns(3))
+                    throw new Exception("Expected 3-item Web fence in horizontal layout to have WidthForColumns(3)=" + Fence.WidthForColumns(3) + ", got " + smallWeb.Rect.Width);
+                if (bigApps.Rect.Width <= smallWeb.Rect.Width || bigGames.Rect.Width <= smallWeb.Rect.Width)
+                    throw new Exception("Expected large Apps/Games fences to receive proportional extra width in horizontal layout.");
+                Console.WriteLine("[PASS] Proportional horizontal layout widths (Apps=" + bigApps.Rect.Width + "px, Games=" + bigGames.Rect.Width + "px, Web=" + smallWeb.Rect.Width + "px) verified.");
 
                 Console.WriteLine("=== ALL SELF-TESTS PASSED ===");
                 return 0;

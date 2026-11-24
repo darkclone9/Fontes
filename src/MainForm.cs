@@ -77,6 +77,8 @@ namespace Fontes
         bool _isDrawingNewFence;
         Point _drawFenceStart;
         Rectangle _drawFenceRect;
+        IntPtr _drawFenceHook = IntPtr.Zero;
+        DesktopHost.LowLevelMouseProc _drawFenceHookProc;
 
         // Magnetic alignment guide lines shown during move/resize
         List<(Point, Point)> _snapGuides = new List<(Point, Point)>();
@@ -127,8 +129,8 @@ namespace Fontes
             }
         }
 
-        bool IsFullScreenInteractionActive =>
-            _dragMove || _dragResize || _isDraggingItem || _isDrawingNewFence || _drawFenceMode;
+        bool IsPointerDragActive =>
+            _dragMove || _dragResize || _isDraggingItem || _isDrawingNewFence;
 
         bool IsStatusToastVisible =>
             _drawFenceMode || _peek || _quickHide || (DateTime.Now < _statusUntil && !string.IsNullOrEmpty(_statusBanner));
@@ -180,7 +182,7 @@ namespace Fontes
                     needsRepaint = true;
                 }
 
-                if (!IsFullScreenInteractionActive && IsHandleCreated && !IsDisposed)
+                if (!IsPointerDragActive && IsHandleCreated && !IsDisposed)
                 {
                     Point cur = PointToClient(Cursor.Position);
                     var fullHud = GetExpandedHudPillBounds();
@@ -244,8 +246,15 @@ namespace Fontes
             };
         }
 
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            UpdateWindowRegion();
+        }
+
         void CleanupResources()
         {
+            UninstallDrawFenceHook();
             if (_uiTimer != null)
             {
                 _uiTimer.Stop();
@@ -302,24 +311,13 @@ namespace Fontes
             _trayIcon.DoubleClick += (s, e) => ToggleQuickHide();
         }
 
-        /// <summary>Clips MainForm's window Region strictly to the floating HUD pill + visible fences
-        /// when idle so that 100% of the empty desktop passes through natively to the live animated
-        /// Wallpaper Engine background and native desktop clicks. Expands to full screen only during
-        /// active fence drag/resize or Draw-Fence crosshair mode.</summary>
+        /// <summary>Clips MainForm's window Region strictly to the floating HUD pill + visible fences +
+        /// active snap guides + dragged item ghost + rubber-band draw rectangle. Region is NEVER null,
+        /// ensuring 100% of the empty desktop passes through natively to live animated Wallpaper Engine
+        /// backgrounds without ever flashing a full-screen static wallpaper.</summary>
         public void UpdateWindowRegion()
         {
             if (IsDisposed || !IsHandleCreated) return;
-
-            if (IsFullScreenInteractionActive)
-            {
-                if (Region != null)
-                {
-                    var old = Region;
-                    Region = null;
-                    old.Dispose();
-                }
-                return;
-            }
 
             var reg = new Region();
             reg.MakeEmpty();
@@ -351,6 +349,35 @@ namespace Fontes
                     {
                         reg.Union(fp);
                     }
+                }
+            }
+
+            if (_snapGuides.Count > 0)
+            {
+                foreach (var seg in _snapGuides)
+                {
+                    int gx = Math.Min(seg.Item1.X, seg.Item2.X) - 2;
+                    int gy = Math.Min(seg.Item1.Y, seg.Item2.Y) - 2;
+                    int gw = Math.Abs(seg.Item2.X - seg.Item1.X) + 4;
+                    int gh = Math.Abs(seg.Item2.Y - seg.Item1.Y) + 4;
+                    reg.Union(new Rectangle(gx, gy, gw, gh));
+                }
+            }
+
+            if (_isDraggingItem && _pressedItem != null)
+            {
+                Point cur = PointToClient(Cursor.Position);
+                using (var dragPath = Rounded(new Rectangle(cur.X - 20, cur.Y - 20, 41, 41), 8))
+                {
+                    reg.Union(dragPath);
+                }
+            }
+
+            if (_isDrawingNewFence && _drawFenceRect.Width > 4 && _drawFenceRect.Height > 4)
+            {
+                using (var drawPath = Rounded(new Rectangle(_drawFenceRect.X, _drawFenceRect.Y, _drawFenceRect.Width + 1, _drawFenceRect.Height + 1), Fence.CornerRadius))
+                {
+                    reg.Union(drawPath);
                 }
             }
 
@@ -527,9 +554,102 @@ namespace Fontes
             _drawFenceMode = !_drawFenceMode;
             _isDrawingNewFence = false;
             _drawFenceRect = Rectangle.Empty;
+            if (_drawFenceMode) InstallDrawFenceHook();
+            else UninstallDrawFenceHook();
             Cursor = _drawFenceMode ? Cursors.Cross : Cursors.Default;
             UpdateWindowRegion();
             Invalidate();
+        }
+
+        void InstallDrawFenceHook()
+        {
+            if (_drawFenceHook != IntPtr.Zero) return;
+            _drawFenceHookProc = DrawFenceMouseHookCallback;
+            IntPtr hMod = DesktopHost.GetModuleHandle(null);
+            _drawFenceHook = DesktopHost.SetWindowsHookEx(DesktopHost.WH_MOUSE_LL, _drawFenceHookProc, hMod, 0);
+        }
+
+        void UninstallDrawFenceHook()
+        {
+            if (_drawFenceHook != IntPtr.Zero)
+            {
+                DesktopHost.UnhookWindowsHookEx(_drawFenceHook);
+                _drawFenceHook = IntPtr.Zero;
+            }
+        }
+
+        void FinishDrawFenceMode()
+        {
+            var rect = _drawFenceRect;
+            _isDrawingNewFence = false;
+            _drawFenceMode = false;
+            _drawFenceRect = Rectangle.Empty;
+            UninstallDrawFenceHook();
+            Cursor = Cursors.Default;
+            if (rect.Width >= 120 && rect.Height >= 90)
+            {
+                AddFenceAt(rect.Location, rect.Size);
+                SetStatus("Created new fence (" + rect.Width + "x" + rect.Height + ")");
+            }
+            UpdateWindowRegion();
+            Invalidate();
+        }
+
+        IntPtr DrawFenceMouseHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0 && _drawFenceMode && IsHandleCreated && !IsDisposed)
+            {
+                int msg = wParam.ToInt32();
+                var info = (DesktopHost.MSLLHOOKSTRUCT)System.Runtime.InteropServices.Marshal.PtrToStructure(
+                    lParam, typeof(DesktopHost.MSLLHOOKSTRUCT));
+                Point clientPt = PointToClient(new Point(info.pt.x, info.pt.y));
+
+                if (msg == DesktopHost.WM_RBUTTONDOWN)
+                {
+                    BeginInvoke((Action)(() =>
+                    {
+                        if (_drawFenceMode) ToggleDrawFenceMode();
+                    }));
+                    return new IntPtr(1);
+                }
+                if (msg == DesktopHost.WM_LBUTTONDOWN)
+                {
+                    bool onHud = IsHudExpanded && GetHudPillBounds().Contains(clientPt);
+                    bool onToast = IsStatusToastVisible && GetStatusPillBounds().Contains(clientPt);
+                    if (!onHud && !onToast && ClientRectangle.Contains(clientPt))
+                    {
+                        _isDrawingNewFence = true;
+                        _drawFenceStart = clientPt;
+                        _drawFenceRect = new Rectangle(clientPt.X, clientPt.Y, 1, 1);
+                        BeginInvoke((Action)(() =>
+                        {
+                            UpdateWindowRegion();
+                            Invalidate();
+                        }));
+                        return new IntPtr(1);
+                    }
+                }
+                else if (msg == DesktopHost.WM_MOUSEMOVE && _isDrawingNewFence)
+                {
+                    int x = Math.Min(_drawFenceStart.X, clientPt.X);
+                    int y = Math.Max(0, Math.Min(_drawFenceStart.Y, clientPt.Y));
+                    int w = Math.Abs(clientPt.X - _drawFenceStart.X);
+                    int h = Math.Abs(clientPt.Y - _drawFenceStart.Y);
+                    _drawFenceRect = new Rectangle(x, y, w, h);
+                    BeginInvoke((Action)(() =>
+                    {
+                        UpdateWindowRegion();
+                        Invalidate();
+                        Update();
+                    }));
+                }
+                else if (msg == DesktopHost.WM_LBUTTONUP && _isDrawingNewFence)
+                {
+                    BeginInvoke((Action)FinishDrawFenceMode);
+                    return new IntPtr(1);
+                }
+            }
+            return DesktopHost.CallNextHookEx(_drawFenceHook, nCode, wParam, lParam);
         }
 
         void ToggleRollAll()
@@ -652,17 +772,9 @@ namespace Fontes
             if (forceVisible || IsHudExpanded)
             {
                 var pill = GetHudPillBounds();
-                var frosted = DesktopHost.GetFrostedDesktopWallpaper(Size, _work);
                 using (var pillPath = Rounded(pill, HudHeight / 2))
                 {
-                    if (frosted != null)
-                    {
-                        var oldClip = g.Clip;
-                        g.SetClip(pillPath, CombineMode.Intersect);
-                        g.DrawImage(frosted, pill, pill, GraphicsUnit.Pixel);
-                        g.Clip = oldClip;
-                    }
-                    using (var bg = new SolidBrush(Color.FromArgb(228, 16, 18, 26)))
+                    using (var bg = new LinearGradientBrush(pill, Color.FromArgb(245, 28, 32, 46), Color.FromArgb(245, 16, 18, 26), LinearGradientMode.Vertical))
                         g.FillPath(bg, pillPath);
 
                     var borderRect = new Rectangle(pill.X, pill.Y, pill.Width - 1, pill.Height - 1);
@@ -1712,14 +1824,7 @@ namespace Fontes
                 {
                     CanvasMenu.Show(this, e.Location);
                 }
-                else if (e.Button == MouseButtons.Left && e.Clicks == 1)
-                {
-                    _isDrawingNewFence = true;
-                    _drawFenceStart = e.Location;
-                    _drawFenceRect = Rectangle.Empty;
-                    UpdateWindowRegion();
-                }
-                ResetInteractionState(keepDrawFence: true);
+                ResetInteractionState(keepDrawFence: _drawFenceMode);
                 return;
             }
 
@@ -1813,34 +1918,36 @@ namespace Fontes
                 int w = Math.Abs(e.X - _drawFenceStart.X);
                 int h = Math.Abs(e.Y - _drawFenceStart.Y);
                 _drawFenceRect = new Rectangle(x, y, w, h);
+                UpdateWindowRegion();
                 Invalidate();
+                Update();
                 return;
             }
 
-            // 2. Resizing a fence (activate full-screen drag region only after 2px movement)
+            // 2. Resizing a fence (keep window Region tightly clipped to fences)
             if (_resize != ResizeEdge.None && _dragFence != null && e.Button == MouseButtons.Left)
             {
                 if (!_dragResize && (Math.Abs(e.X - _resizeFrom.X) > 2 || Math.Abs(e.Y - _resizeFrom.Y) > 2))
                 {
                     _dragResize = true;
-                    UpdateWindowRegion();
                 }
                 if (_dragResize)
                 {
                     ApplyResize(_dragFence, e.Location);
                     _dragFence.AutoArrange();
+                    UpdateWindowRegion();
                     Invalidate();
+                    Update();
                 }
                 return;
             }
 
-            // 3. Moving a fence (activate full-screen drag region only after 3px threshold so clicks don't flash)
+            // 3. Moving a fence (keep window Region tightly clipped to fences + snap guides)
             if (_potentialFenceMove && !_dragMove && _dragFence != null && e.Button == MouseButtons.Left)
             {
                 if (Math.Abs(e.X - _mouseDownLoc.X) > 3 || Math.Abs(e.Y - _mouseDownLoc.Y) > 3)
                 {
                     _dragMove = true;
-                    UpdateWindowRegion();
                 }
             }
 
@@ -1851,24 +1958,24 @@ namespace Fontes
                 r.Y = Math.Max(0, Math.Min(Height - 28, e.Location.Y - _dragOffset.Y));
                 _dragFence.Rect = ApplyMagneticSnap(_dragFence, r);
                 _dragFence.AutoArrange();
+                UpdateWindowRegion();
                 Invalidate();
+                Update();
                 return;
             }
 
-            // 4. Dragging an item between fences
+            // 4. Dragging an item between fences (keep window Region clipped to fences + 40x40 item ghost)
             if (_pressedItem != null && e.Button == MouseButtons.Left)
             {
                 int dx = Math.Abs(e.X - _mouseDownLoc.X);
                 int dy = Math.Abs(e.Y - _mouseDownLoc.Y);
                 if (dx > SystemInformation.DragSize.Width || dy > SystemInformation.DragSize.Height)
                 {
-                    if (!_isDraggingItem)
-                    {
-                        _isDraggingItem = true;
-                        UpdateWindowRegion();
-                    }
+                    _isDraggingItem = true;
                     Cursor = Cursors.Hand;
+                    UpdateWindowRegion();
                     Invalidate();
+                    Update();
                 }
                 return;
             }
@@ -1959,17 +2066,7 @@ namespace Fontes
             // 1. Finish drawing a new fence rectangle
             if (_isDrawingNewFence)
             {
-                _isDrawingNewFence = false;
-                _drawFenceMode = false;
-                Cursor = Cursors.Default;
-                if (_drawFenceRect.Width >= 120 && _drawFenceRect.Height >= 90)
-                {
-                    AddFenceAt(_drawFenceRect.Location, _drawFenceRect.Size);
-                    SetStatus("Created new fence (" + _drawFenceRect.Width + "x" + _drawFenceRect.Height + ")");
-                }
-                _drawFenceRect = Rectangle.Empty;
-                UpdateWindowRegion();
-                Invalidate();
+                FinishDrawFenceMode();
                 return;
             }
 
@@ -2039,10 +2136,28 @@ namespace Fontes
             Invalidate();
         }
 
+        protected override void OnMouseCaptureChanged(EventArgs e)
+        {
+            base.OnMouseCaptureChanged(e);
+            if (!Capture && (_dragMove || _dragResize || _isDraggingItem || _potentialFenceMove))
+            {
+                if (_dragResize && _dragFence != null)
+                {
+                    _dragFence.SnapHeightToRows();
+                    _dragFence.AutoArrange();
+                }
+                if (_dragMove || _dragResize)
+                    AutoSave();
+                ResetInteractionState(keepDrawFence: _drawFenceMode);
+                UpdateWindowRegion();
+                Invalidate();
+            }
+        }
+
         protected override void OnMouseLeave(EventArgs e)
         {
             base.OnMouseLeave(e);
-            if (IsFullScreenInteractionActive) return;
+            if (IsPointerDragActive) return;
 
             bool needsRepaint = false;
             bool regionChanged = false;
@@ -2245,30 +2360,10 @@ namespace Fontes
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
 
-            // When in full-screen interaction mode (dragging/resizing a fence or Draw-Fence crosshair mode),
-            // render the properly cropped primary-monitor wallpaper slice as the backdrop.
-            // In normal mode, UpdateWindowRegion() clips out everything outside the fences and HUD pill so
-            // the live animated Wallpaper Engine background shows through 100% natively!
-            if (IsFullScreenInteractionActive)
-            {
-                var wp = DesktopHost.GetDesktopWallpaper(Size, _work);
-                if (wp != null)
-                {
-                    g.DrawImage(wp, 0, 0, Width, Height);
-                }
-                else
-                {
-                    using (var bg = new LinearGradientBrush(ClientRectangle, Color.FromArgb(26, 28, 38), Color.FromArgb(16, 18, 24), LinearGradientMode.Vertical))
-                        g.FillRectangle(bg, ClientRectangle);
-                }
-
-                if (_drawFenceMode)
-                {
-                    using (var overlay = new SolidBrush(Color.FromArgb(45, 10, 14, 24)))
-                        g.FillRectangle(overlay, ClientRectangle);
-                }
-            }
-
+            // UpdateWindowRegion() clips MainForm strictly to the visible fences, HUD pill, status toast,
+            // thin snap guide lines, dragged item ghost, and rubber-band draw rect so the live animated
+            // Wallpaper Engine desktop background shows through 100% natively without ever flashing a
+            // static wallpaper image!
             if (!_peek && !_quickHide)
             {
                 foreach (var f in ActivePageFences.OrderBy(x => x.Z))
@@ -2280,7 +2375,7 @@ namespace Fontes
             // Paint magnetic snap alignment guide lines
             if (_snapGuides.Count > 0)
             {
-                using (var guidePen = new Pen(Color.FromArgb(215, 65, 215, 255), 1.5f) { DashStyle = DashStyle.Dash })
+                using (var guidePen = new Pen(Color.FromArgb(235, 65, 215, 255), 1.8f) { DashStyle = DashStyle.Dash })
                 {
                     foreach (var seg in _snapGuides)
                         g.DrawLine(guidePen, seg.Item1, seg.Item2);
@@ -2291,8 +2386,8 @@ namespace Fontes
             if (_isDrawingNewFence && _drawFenceRect.Width > 4 && _drawFenceRect.Height > 4)
             {
                 using (var path = Rounded(_drawFenceRect, Fence.CornerRadius))
-                using (var fill = new SolidBrush(Color.FromArgb(95, 70, 135, 235)))
-                using (var pen = new Pen(Color.FromArgb(230, 130, 195, 255), 1.5f) { DashStyle = DashStyle.Dash })
+                using (var fill = new SolidBrush(Color.FromArgb(185, 38, 64, 112)))
+                using (var pen = new Pen(Color.FromArgb(240, 130, 195, 255), 1.5f) { DashStyle = DashStyle.Dash })
                 {
                     g.FillPath(fill, path);
                     g.DrawPath(pen, path);
@@ -2301,10 +2396,18 @@ namespace Fontes
                 DrawShadowedText(g, dimText, _titleFont, Color.White, _drawFenceRect.X + 12, _drawFenceRect.Y + 8);
             }
 
-            // Paint dragged item ghost
+            // Paint dragged item ghost tile
             if (_isDraggingItem && _pressedItem != null)
             {
                 var cur = PointToClient(Cursor.Position);
+                var tileRect = new Rectangle(cur.X - 20, cur.Y - 20, 40, 40);
+                using (var tp = Rounded(tileRect, 8))
+                using (var tb = new SolidBrush(Color.FromArgb(235, 28, 34, 48)))
+                using (var tpen = new Pen(Color.FromArgb(180, 130, 195, 255), 1f))
+                {
+                    g.FillPath(tb, tp);
+                    g.DrawPath(tpen, tp);
+                }
                 var bmp = _pressedItem.GetCachedIconBitmap();
                 if (bmp != null)
                     g.DrawImage(bmp, new Rectangle(cur.X - 16, cur.Y - 16, 32, 32));
@@ -2315,23 +2418,46 @@ namespace Fontes
         {
             var r = f.EffectiveBounds;
             bool isHoveredFence = (_hoveredFence == f);
-            var frosted = DesktopHost.GetFrostedDesktopWallpaper(Size, _work);
 
             using (var path = Rounded(r, Fence.CornerRadius))
             {
-                // 1. Sample frosted primary-monitor wallpaper slice behind this fence card
-                if (frosted != null)
+                // 1. Deep charcoal dark-glass base so live desktop never shows stale static wallpaper textures
+                using (var baseBg = new SolidBrush(Color.FromArgb(242, 16, 18, 24)))
+                {
+                    g.FillPath(baseBg, path);
+                }
+
+                // 2. Rich diagonal dark-glass card gradient from f.Shade & f.Opacity
+                Color baseShade = f.Shade;
+                int alpha = Math.Max(30, Math.Min(255, f.Opacity));
+                int rTop = Math.Min(255, (int)(baseShade.R * 0.96f + 16));
+                int gTop = Math.Min(255, (int)(baseShade.G * 0.96f + 18));
+                int bTop = Math.Min(255, (int)(baseShade.B * 0.96f + 24));
+                int rBot = Math.Max(10, (int)(baseShade.R * 0.68f + 6));
+                int gBot = Math.Max(12, (int)(baseShade.G * 0.68f + 8));
+                int bBot = Math.Max(16, (int)(baseShade.B * 0.68f + 12));
+                var gradRect = new Rectangle(r.X, r.Y, Math.Max(1, r.Width), Math.Max(1, r.Height));
+                using (var shadeGrad = new LinearGradientBrush(
+                    gradRect,
+                    Color.FromArgb(alpha, rTop, gTop, bTop),
+                    Color.FromArgb(alpha, rBot, gBot, bBot),
+                    LinearGradientMode.ForwardDiagonal))
+                {
+                    g.FillPath(shadeGrad, path);
+                }
+
+                // 3. Subtle top specular glass sheen
+                var sheenRect = new Rectangle(r.X, r.Y, Math.Max(1, r.Width), Math.Max(1, Math.Min(48, r.Height / 2)));
+                using (var sheen = new LinearGradientBrush(
+                    sheenRect,
+                    Color.FromArgb(24, 255, 255, 255),
+                    Color.FromArgb(0, 255, 255, 255),
+                    LinearGradientMode.Vertical))
                 {
                     var oldClip = g.Clip;
                     g.SetClip(path, CombineMode.Intersect);
-                    g.DrawImage(frosted, r, r, GraphicsUnit.Pixel);
+                    g.FillRectangle(sheen, sheenRect);
                     g.Clip = oldClip;
-                }
-
-                // 2. Translucent dark-glass shade fill
-                using (var shade = new SolidBrush(f.EffectiveShade))
-                {
-                    g.FillPath(shade, path);
                 }
             }
 
@@ -2397,13 +2523,30 @@ namespace Fontes
 
         static void DrawFenceBorder(Graphics g, Rectangle r, bool isHoveredFence)
         {
+            if (r.Width > 3 && r.Height > 3)
+            {
+                var innerRect = new Rectangle(r.X + 1, r.Y + 1, r.Width - 3, r.Height - 3);
+                using (var innerPath = Rounded(innerRect, Math.Max(1, Fence.CornerRadius - 1)))
+                using (var innerPen = new Pen(Color.FromArgb(isHoveredFence ? 55 : 28, 255, 255, 255), 1f))
+                {
+                    g.DrawPath(innerPen, innerPath);
+                }
+            }
             var outerRect = new Rectangle(r.X, r.Y, Math.Max(1, r.Width - 1), Math.Max(1, r.Height - 1));
-            int borderAlpha = isHoveredFence ? 185 : 105;
+            int borderAlpha = isHoveredFence ? 190 : 115;
             using (var borderPath = Rounded(outerRect, Fence.CornerRadius))
-            using (var pen = new Pen(Color.FromArgb(borderAlpha, 255, 255, 255), 1f))
+            using (var pen = new Pen(Color.FromArgb(borderAlpha, 210, 225, 255), 1f))
             {
                 g.DrawPath(pen, borderPath);
             }
+        }
+
+        public enum HeaderButtonKind
+        {
+            Search = 0,
+            RollUp = 1,
+            RollDown = 2,
+            Close = 3
         }
 
         void DrawTitle(Graphics g, Fence f, Rectangle headerRect)
@@ -2439,9 +2582,9 @@ namespace Fontes
 
             if (f.IsSearching || !string.IsNullOrEmpty(f.SearchFilter))
             {
-                string filterLabel = "\uD83D\uDD0D " + (string.IsNullOrEmpty(f.SearchFilter) ? "type…" : f.SearchFilter);
+                string filterLabel = "Filter: " + (string.IsNullOrEmpty(f.SearchFilter) ? "type…" : f.SearchFilter);
                 var fs = TextRenderer.MeasureText(filterLabel, _badgeFont);
-                int fw = Math.Min(Math.Max(54, fs.Width + 12), Math.Max(54, f.SearchButtonRect.Left - badgeX - 6));
+                int fw = Math.Min(Math.Max(62, fs.Width + 14), Math.Max(62, f.SearchButtonRect.Left - badgeX - 6));
                 var searchPill = new Rectangle(badgeX, by, fw, bh);
                 using (var sp = Rounded(searchPill, 9))
                 using (var sf = new SolidBrush(Color.FromArgb(185, 35, 95, 165)))
@@ -2466,9 +2609,9 @@ namespace Fontes
             if (isHoveredFence || f.IsSearching)
             {
                 if (!f.IsEffectiveCollapsed)
-                    DrawHeaderActionButton(g, f.SearchButtonRect, "\u2315", _hoveredHeaderBtn == 0 || f.IsSearching, false);
-                DrawHeaderActionButton(g, f.RollButtonRect, f.IsEffectiveCollapsed ? "\u25BE" : "\u25B4", _hoveredHeaderBtn == 1, false);
-                DrawHeaderActionButton(g, f.CloseButtonRect, "\u00D7", _hoveredHeaderBtn == 2, true);
+                    DrawHeaderActionButton(g, f.SearchButtonRect, HeaderButtonKind.Search, _hoveredHeaderBtn == 0 || f.IsSearching, false);
+                DrawHeaderActionButton(g, f.RollButtonRect, f.IsEffectiveCollapsed ? HeaderButtonKind.RollDown : HeaderButtonKind.RollUp, _hoveredHeaderBtn == 1, false);
+                DrawHeaderActionButton(g, f.CloseButtonRect, HeaderButtonKind.Close, _hoveredHeaderBtn == 2, true);
             }
             else if (f.Locked)
             {
@@ -2476,20 +2619,54 @@ namespace Fontes
             }
             else if (f.IsEffectiveCollapsed)
             {
-                DrawShadowedText(g, "\u25BE", _titleFont, Color.FromArgb(190, 210, 235), headerRect.Right - 22, textY);
+                DrawHeaderActionButton(g, new Rectangle(headerRect.Right - 26, headerRect.Y + 5, 20, 20), HeaderButtonKind.RollDown, false, false);
             }
         }
 
-        void DrawHeaderActionButton(Graphics g, Rectangle r, string glyph, bool isHover, bool isDanger)
+        public static void DrawHeaderActionButton(Graphics g, Rectangle r, HeaderButtonKind kind, bool isHover, bool isDanger)
         {
             if (isHover)
             {
-                Color bg = isDanger ? Color.FromArgb(190, 185, 55, 65) : Color.FromArgb(165, 70, 95, 140);
+                Color bg = isDanger ? Color.FromArgb(195, 190, 55, 65) : Color.FromArgb(175, 70, 95, 145);
                 using (var p = Rounded(r, 6))
                 using (var b = new SolidBrush(bg))
                     g.FillPath(b, p);
             }
-            GfxText.Center(g, glyph, r, Brushes.White, _badgeFont, isHover ? Color.White : Color.FromArgb(185, 205, 230));
+
+            Color fg = isHover ? Color.White : Color.FromArgb(215, 195, 212, 236);
+            var oldSmooth = g.SmoothingMode;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var pen = new Pen(fg, 1.65f) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+            {
+                switch (kind)
+                {
+                    case HeaderButtonKind.Search:
+                        g.DrawEllipse(pen, r.X + 4.5f, r.Y + 4.5f, 7.2f, 7.2f);
+                        g.DrawLine(pen, r.X + 10.6f, r.Y + 10.6f, r.X + 15.0f, r.Y + 15.0f);
+                        break;
+                    case HeaderButtonKind.RollUp:
+                        g.DrawLines(pen, new PointF[]
+                        {
+                            new PointF(r.X + 5.5f, r.Y + 12.2f),
+                            new PointF(r.X + 10.0f, r.Y + 7.6f),
+                            new PointF(r.X + 14.5f, r.Y + 12.2f)
+                        });
+                        break;
+                    case HeaderButtonKind.RollDown:
+                        g.DrawLines(pen, new PointF[]
+                        {
+                            new PointF(r.X + 5.5f, r.Y + 7.8f),
+                            new PointF(r.X + 10.0f, r.Y + 12.4f),
+                            new PointF(r.X + 14.5f, r.Y + 7.8f)
+                        });
+                        break;
+                    case HeaderButtonKind.Close:
+                        g.DrawLine(pen, r.X + 6.0f, r.Y + 6.0f, r.X + 14.0f, r.Y + 14.0f);
+                        g.DrawLine(pen, r.X + 14.0f, r.Y + 6.0f, r.X + 6.0f, r.Y + 14.0f);
+                        break;
+                }
+            }
+            g.SmoothingMode = oldSmooth;
         }
 
         void DrawItem(Graphics g, Fence f, ShortcutItem it, Rectangle cell)
@@ -2641,6 +2818,7 @@ namespace Fontes
                     _drawFenceMode = false;
                     _isDrawingNewFence = false;
                     _drawFenceRect = Rectangle.Empty;
+                    UninstallDrawFenceHook();
                     Cursor = Cursors.Default;
                     UpdateWindowRegion();
                     Invalidate();

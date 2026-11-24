@@ -197,18 +197,20 @@ namespace Fontes
             Items = nav;
         }
 
-        /// <summary>Arranges FilteredItems into a centered, row-aligned grid inside the fence;
-        /// overflows become scrollable via ScrollOffset.</summary>
+        /// <summary>Arranges FilteredItems into a row-aligned grid inside the fence; left-aligns partial
+        /// single-row fences so small groups never leave awkward horizontal gaps, and centers multi-row grids.</summary>
         public void AutoArrange(Point? cellsOriginOverride = null, bool growToFit = false)
         {
             int itemW = CellSize, itemH = CellSize;
             int cols = Columns;
             int gridW = cols * itemW;
-            int startX = Rect.X + Math.Max(SidePad, (Rect.Width - gridW) / 2);
+            var visibleList = FilteredItems;
+            int startX = visibleList.Count < cols
+                ? Rect.X + SidePad + 2
+                : Rect.X + Math.Max(SidePad, (Rect.Width - gridW) / 2);
             int startY = Rect.Y + TitleHeight + TopPad;
             Point cellsOrigin = cellsOriginOverride ?? new Point(startX, startY);
 
-            var visibleList = FilteredItems;
             int col = 0;
             int x = cellsOrigin.X, y = cellsOrigin.Y;
 

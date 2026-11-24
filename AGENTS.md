@@ -4,10 +4,17 @@
 - **Never stretch `SPI_GETDESKWALLPAPER` directly onto a single monitor without checking `SystemInformation.VirtualScreen`**:
   - On multi-monitor Windows setups running Wallpaper Engine (or Windows `Span` wallpaper mode), `SPI_GETDESKWALLPAPER` (`WallpaperEngineOverride_*.jpg` or `TranscodedWallpaper`) is a composite image spanning the entire `SystemInformation.VirtualScreen` bounding box (including negative coordinates and black void regions between mismatched monitor resolutions).
   - Always detect when the wallpaper dimensions/aspect match `SystemInformation.VirtualScreen` and crop the exact sub-rectangle for the target monitor (`(monRect.X - vs.X) * scaleX`, `(monRect.Y - vs.Y) * scaleY`, `monRect.Width * scaleX`, `monRect.Height * scaleY`).
-- **Preserve Live Animated Wallpapers via Window `Region` Clipping**:
-  - Do not cover the entire desktop with an opaque full-screen `Form` during normal operation, as that blocks live animated Wallpaper Engine backgrounds and intercepts native desktop clicks.
-  - Clip `MainForm.Region` to the union of the visible fences' rounded rectangles (`Fence.EffectiveBounds`) and the compact top-center floating HUD pill (`UpdateWindowRegion()`), expanding `Region = null` only temporarily during active fence move/resize drags or Draw-Fence crosshair mode.
-  - Inside each fence card, composite a frosted blur of the properly-cropped monitor wallpaper slice under the translucent dark-glass tint (`Fence.EffectiveShade`).
+- **Preserve Live Animated Wallpapers via Permanent Window `Region` Clipping (`Region` Must NEVER Be `null`)**:
+  - Do not cover the entire desktop with an opaque full-screen `Form` during normal operation OR during mouse drag/resize/draw interactions, as setting `Region = null` and painting `SPI_GETDESKWALLPAPER` flashes an outdated static wallpaper (`WallpaperEngineOverride_*.jpg`) over live animated Wallpaper Engine scenes.
+  - WinForms/Win32 automatically holds mouse capture (`Capture = true`) between `OnMouseDown` and `OnMouseUp` even when the cursor moves outside `MainForm.Region`. Keep `MainForm.Region` strictly clipped at all times to the union of the visible fences (`Fence.EffectiveBounds`), floating HUD pill, status toast, 4px magnetic `_snapGuides` lines, 40x40 dragged item ghost tile, and rubber-band `_drawFenceRect`.
+  - When `_drawFenceMode` is active, use a temporary low-level mouse hook (`WH_MOUSE_LL`) only for the duration of `_drawFenceMode` to catch the initial desktop click/drag without expanding `MainForm.Region` to full screen.
+  - Never paint `SPI_GETDESKWALLPAPER` (`GetFrostedDesktopWallpaper` / `GetDesktopWallpaper`) inside live `PaintFence`, `PaintHudPill`, or `OnPaint`, because the static disk image often mismatches the active live Wallpaper Engine scene. Render rich dark-glass card gradients (`LinearGradientBrush` derived from `Fence.Shade` and `Fence.Opacity` with a top specular glass sheen and dual inner/outer borders) instead.
+
+## 4. Vector Header Action Glyphs & Proportional Horizontal Layout Sizing
+- **Never rely on Unicode `\u2315` (`TELEPHONE RECORDER`) in `Segoe UI` for the header Search button**:
+  - `Segoe UI` lacks a glyph for `U+2315` and renders a missing-glyph rectangle box (`▯`). Always render fence header buttons (Search magnifying glass, Roll-up/Roll-down chevrons, Close `×`) using anti-aliased GDI+ vector primitives (`DrawEllipse`, `DrawLine`, `DrawLines`).
+- **Proportional Horizontal Layout Widths**:
+  - When applying a `"Horizontal"` `FencesLayoutArea` (such as a bottom dock preset), size small fences (`Items.Count < equalCols * rows`) to their natural column width (`Fence.WidthForColumns(Math.Max(3, colsNeeded))`) and distribute the remaining horizontal width proportionally across high-item-count fences.
 
 ## 2. `.url` & `.lnk` Shortcut Icon Extraction Rules
 - **Never use `SystemIcons.Shield` as a fallback icon for `.url` or web shortcuts**:

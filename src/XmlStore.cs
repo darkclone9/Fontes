@@ -52,7 +52,7 @@ namespace Fontes
             var root = doc.CreateElement("FontesSnapshot");
             root.SetAttribute("timestamp", DateTime.Now.ToString("o"));
             root.SetAttribute("resolutionFingerprint", DesktopHost.GetResolutionFingerprint());
-            root.SetAttribute("layoutVersion", "3");
+            root.SetAttribute("layoutVersion", "4");
             doc.AppendChild(root);
 
             var groups = doc.CreateElement("Groups");
@@ -292,8 +292,8 @@ namespace Fontes
                 list.Add(f);
             }
 
-            // Migrate v1 (270x220) or v2 (370x390 / 284x132 at CellSize=86) default layout geometries to v3 row-aligned grids
-            if (path == null && !string.Equals(layoutVersion, "3", StringComparison.Ordinal) && list.Count > 0 &&
+            // Migrate v1 (270x220) or v2 (370x390 / 284x132 at CellSize=86) default layout geometries to v3/v4 row-aligned grids
+            if (path == null && !string.Equals(layoutVersion, "4", StringComparison.Ordinal) && list.Count > 0 &&
                 list.All(x => x.Rect.Width == 270 || x.Rect.Width == 370 || x.Rect.Width == 284))
             {
                 int curX = 36;
@@ -310,6 +310,19 @@ namespace Fontes
                     f.AutoArrange();
                     curX += w + gap;
                 }
+            }
+
+            // Migrate v3 equal-width (w=666) horizontal bottom dock layouts to v4 proportional horizontal widths
+            if (path == null && !string.Equals(layoutVersion, "4", StringComparison.Ordinal) && list.Count > 1 &&
+                list.All(x => x.Rect.Width == 666) && list.Any(x => x.Items.Count <= 4) && list.Any(x => x.Items.Count >= 20))
+            {
+                var bottomTpl = new FencesLayoutTemplate
+                {
+                    Name = "Bottom",
+                    Areas = { new FencesLayoutArea { Alignment = "BottomRight", Orientation = "Horizontal", Width = 1.0, Height = 0.24 } }
+                };
+                var vs = DesktopHost.VirtualScreen();
+                ApplyFencesLayout(list, bottomTpl, new Rectangle(0, 0, vs.Width, vs.Height), MainForm.ToolbarH);
             }
 
             return list;
@@ -444,13 +457,76 @@ namespace Fontes
 
                 if (horiz)
                 {
-                    int slotW = Math.Max(160, (ar.Width - gap * (bucket.Count - 1)) / bucket.Count);
+                    int targetRows = Math.Max(1, (int)Math.Round((ar.Height - Fence.TitleHeight - Fence.VerticalPadding) / (double)Fence.CellSize));
+                    int totalAvailW = Math.Max(Fence.WidthForColumns(1) * bucket.Count, ar.Width - gap * (bucket.Count - 1));
+
+                    int[] naturalWidths = new int[bucket.Count];
                     for (int j = 0; j < bucket.Count; j++)
                     {
+                        int cnt = Math.Max(1, bucket[j].Items.Count);
+                        int colsForAll = Math.Max(3, (cnt + targetRows - 1) / targetRows);
+                        naturalWidths[j] = Fence.WidthForColumns(colsForAll);
+                    }
+
+                    int[] slotWidths = new int[bucket.Count];
+                    int equalW = totalAvailW / bucket.Count;
+                    int remainingW = totalAvailW;
+                    var flexibleIndices = new List<int>();
+
+                    for (int j = 0; j < bucket.Count; j++)
+                    {
+                        if (naturalWidths[j] < equalW)
+                        {
+                            slotWidths[j] = naturalWidths[j];
+                            remainingW -= slotWidths[j];
+                        }
+                        else
+                        {
+                            flexibleIndices.Add(j);
+                        }
+                    }
+
+                    if (flexibleIndices.Count > 0)
+                    {
+                        double totalWeight = flexibleIndices.Sum(idx => Math.Max(1.0, Math.Sqrt(Math.Max(1, bucket[idx].Items.Count))));
+                        int distributed = 0;
+                        for (int k = 0; k < flexibleIndices.Count; k++)
+                        {
+                            int idx = flexibleIndices[k];
+                            if (k == flexibleIndices.Count - 1)
+                            {
+                                slotWidths[idx] = Math.Max(Fence.WidthForColumns(3), remainingW - distributed);
+                            }
+                            else
+                            {
+                                double weight = Math.Max(1.0, Math.Sqrt(Math.Max(1, bucket[idx].Items.Count)));
+                                int w = Math.Max(Fence.WidthForColumns(3), (int)Math.Round(remainingW * (weight / totalWeight)));
+                                slotWidths[idx] = w;
+                                distributed += w;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        for (int j = 0; j < bucket.Count; j++)
+                            slotWidths[j] = equalW;
+                    }
+
+                    bool alignBottom = (tpl.Areas[aIdx].Alignment ?? "").IndexOf("bottom", StringComparison.OrdinalIgnoreCase) >= 0;
+                    int curX = ar.X;
+                    for (int j = 0; j < bucket.Count; j++)
+                    {
+                        int sw = slotWidths[j];
                         bucket[j].RolledUp = false;
-                        bucket[j].Rect = new Rectangle(ar.X + j * (slotW + gap), ar.Y, slotW, ar.Height);
+                        int cols = Math.Max(1, (sw - Fence.SidePad * 2) / Fence.CellSize);
+                        int neededRows = Math.Max(1, (Math.Max(1, bucket[j].Items.Count) + cols - 1) / cols);
+                        int rows = Math.Min(targetRows, neededRows);
+                        int sh = Fence.HeightForRows(rows);
+                        int sy = alignBottom ? (ar.Bottom - sh) : ar.Y;
+                        bucket[j].Rect = new Rectangle(curX, sy, sw, sh);
                         bucket[j].SnapHeightToRows();
                         bucket[j].AutoArrange();
+                        curX += sw + gap;
                     }
                 }
                 else
